@@ -111,6 +111,16 @@
 
 重启 Claude Code。来自先前会话的上下文将自动出现在新会话中。
 
+### Pi-Agent（pi-mono）
+
+将 claude-mem 作为 [pi-agents](https://github.com/badlogic/pi-mono) 的持久化内存扩展安装：
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+为任何基于 pi-mono 的智能体（pi-coding-agent、OpenClaw、自定义运行时）提供跨会话记忆。观察数据在同一数据库的所有引擎之间共享。详见 [pi-agent README](../pi-agent/README.md)。
+
 **核心特性:**
 
 - 🧠 **持久化内存** - 上下文跨会话保留

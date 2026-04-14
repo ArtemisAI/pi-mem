@@ -111,6 +111,16 @@ Spusťte nové sezení Claude Code v terminálu a zadejte následující příka
 
 Restartujte Claude Code. Kontext z předchozích sezení se automaticky objeví v nových sezeních.
 
+### Pi-Agent (pi-mono)
+
+Nainstalujte claude-mem jako rozšíření trvalé paměti pro [pi-agenty](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Poskytuje libovolnému agentovi založenému na pi-mono (pi-coding-agent, OpenClaw, vlastní runtime) paměť přetrvávající mezi sezeními. Pozorování jsou sdílena napříč všemi enginy ve stejné databázi. Úplné podrobnosti najdete v [README pi-agenta](../pi-agent/README.md).
+
 **Klíčové vlastnosti:**
 
 - 🧠 **Trvalá paměť** - Kontext přetrvává napříč sezeními

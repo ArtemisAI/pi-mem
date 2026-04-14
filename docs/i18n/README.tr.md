@@ -110,6 +110,16 @@ Terminal üzerinden yeni bir Claude Code oturumu başlatın ve aşağıdaki komu
 
 Claude Code'u yeniden başlatın. Önceki oturumlardaki bağlam otomatik olarak yeni oturumlarda görünecektir.
 
+### Pi-Agent (pi-mono)
+
+claude-mem'i [pi-agents](https://github.com/badlogic/pi-mono) için kalıcı bellek uzantısı olarak yükleyin:
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Pi-mono tabanlı herhangi bir ajana (pi-coding-agent, OpenClaw, özel çalışma zamanları) oturumlar arası bellek kazandırır. Gözlemler aynı veritabanındaki tüm motorlar arasında paylaşılır. Tam ayrıntılar için [pi-agent README](../pi-agent/README.md) dosyasına bakın.
+
 **Temel Özellikler:**
 
 - 🧠 **Kalıcı Bellek** - Bağlam oturumlar arası hayatta kalır

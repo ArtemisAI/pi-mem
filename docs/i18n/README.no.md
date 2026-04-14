@@ -111,6 +111,16 @@ Start en ny Claude Code-økt i terminalen og skriv inn følgende kommandoer:
 
 Start Claude Code på nytt. Kontekst fra tidligere økter vil automatisk vises i nye økter.
 
+### Pi-Agent (pi-mono)
+
+Installer claude-mem som en vedvarende minneutvidelse for [pi-agents](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Gir alle pi-mono-baserte agenter (pi-coding-agent, OpenClaw, egendefinerte kjøretider) minne på tvers av økter. Observasjoner deles på tvers av alle motorer i samme database. Se [pi-agent README](../pi-agent/README.md) for fullstendige detaljer.
+
 **Nøkkelfunksjoner:**
 
 - 🧠 **Vedvarende Minne** - Kontekst overlever på tvers av økter

@@ -52,7 +52,8 @@
     "plugin/scripts/CLAUDE.md",
     "plugin/skills",
     "plugin/ui",
-    "openclaw"
+    "openclaw",
+    "pi-agent"
   ],
   "engines": {
     "node": ">=18.0.0",

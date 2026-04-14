@@ -111,6 +111,16 @@
 
 Claude Code를 재시작하세요. 이전 세션의 컨텍스트가 자동으로 새 세션에 나타납니다.
 
+### Pi-Agent (pi-mono)
+
+[pi-agent](https://github.com/badlogic/pi-mono)용 지속적인 메모리 확장으로 claude-mem을 설치하세요:
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+pi-mono 기반의 모든 에이전트(pi-coding-agent, OpenClaw, 커스텀 런타임)에 세션 간 메모리를 제공합니다. 관찰 데이터는 동일한 데이터베이스 내 모든 엔진에서 공유됩니다. 자세한 내용은 [pi-agent README](../pi-agent/README.md)를 참조하세요.
+
 **주요 기능:**
 
 - 🧠 **지속적인 메모리** - 세션 간 컨텍스트 유지

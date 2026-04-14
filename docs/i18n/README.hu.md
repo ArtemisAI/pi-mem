@@ -111,6 +111,16 @@ Indítson el egy új Claude Code munkamenetet a terminálban, és írja be a kö
 
 Indítsa újra a Claude Code-ot. A korábbi munkamenetek kontextusa automatikusan megjelenik az új munkamenetekben.
 
+### Pi-Agent (pi-mono)
+
+Telepítse a claude-mem-et tartós memória-bővítményként [pi-agentekhez](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Bármely pi-mono alapú agentnek (pi-coding-agent, OpenClaw, egyéni futtatókörnyezetek) munkamenetek közötti memóriát biztosít. A megfigyelések ugyanazon adatbázis összes motorja között megosztottak. A teljes részletekért lásd a [pi-agent README-t](../pi-agent/README.md).
+
 **Főbb jellemzők:**
 
 - 🧠 **Tartós memória** - A kontextus túléli a munkameneteket

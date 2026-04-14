@@ -110,6 +110,16 @@
 
 รีสตาร์ท Claude Code บริบทจากเซสชันก่อนหน้าจะปรากฏในเซสชันใหม่โดยอัตโนมัติ
 
+### Pi-Agent (pi-mono)
+
+ติดตั้ง claude-mem เป็นส่วนขยายหน่วยความจำถาวรสำหรับ [pi-agents](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+มอบหน่วยความจำข้ามเซสชันให้กับ agent ที่ใช้ pi-mono (pi-coding-agent, OpenClaw, custom runtimes) ทุกตัว การสังเกตจะถูกแชร์ระหว่างทุก engine ในฐานข้อมูลเดียวกัน ดูรายละเอียดทั้งหมดได้ที่ [pi-agent README](../pi-agent/README.md)
+
 **คุณสมบัติหลัก:**
 
 - 🧠 **หน่วยความจำถาวร** - บริบทยังคงอยู่ข้ามเซสชัน

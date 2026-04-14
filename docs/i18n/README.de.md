@@ -111,6 +111,16 @@ Starten Sie eine neue Claude Code-Sitzung im Terminal und geben Sie die folgende
 
 Starten Sie Claude Code neu. Kontext aus vorherigen Sitzungen wird automatisch in neuen Sitzungen angezeigt.
 
+### Pi-Agent (pi-mono)
+
+Installieren Sie claude-mem als persistente Speichererweiterung für [pi-agents](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Gibt jedem pi-mono-basierten Agenten (pi-coding-agent, OpenClaw, benutzerdefinierte Laufzeiten) sitzungsübergreifenden Speicher. Beobachtungen werden über alle Engines in derselben Datenbank geteilt. Weitere Details finden Sie in der [pi-agent README](../pi-agent/README.md).
+
 **Hauptmerkmale:**
 
 - 🧠 **Persistenter Speicher** - Kontext bleibt über Sitzungen hinweg erhalten

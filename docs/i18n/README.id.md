@@ -111,6 +111,16 @@ Mulai sesi Claude Code baru di terminal dan masukkan perintah berikut:
 
 Restart Claude Code. Konteks dari sesi sebelumnya akan secara otomatis muncul di sesi baru.
 
+### Pi-Agent (pi-mono)
+
+Instal claude-mem sebagai ekstensi memori persisten untuk [pi-agents](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Memberikan memori lintas sesi kepada agent berbasis pi-mono mana pun (pi-coding-agent, OpenClaw, custom runtimes). Observasi dibagikan di semua engine dalam database yang sama. Lihat [pi-agent README](../pi-agent/README.md) untuk detail lengkap.
+
 **Fitur Utama:**
 
 - 🧠 **Memori Persisten** - Konteks bertahan di seluruh sesi

@@ -1,14 +1,34 @@
 <h1 align="center">
   <br>
-  <a href="https://github.com/thedotmack/claude-mem">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/thedotmack/claude-mem/main/docs/public/claude-mem-logo-for-dark-mode.webp">
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/thedotmack/claude-mem/main/docs/public/claude-mem-logo-for-light-mode.webp">
-      <img src="https://raw.githubusercontent.com/thedotmack/claude-mem/main/docs/public/claude-mem-logo-for-light-mode.webp" alt="Claude-Mem" width="400">
-    </picture>
-  </a>
+  <img src="pi-agent/banner.png" alt="pi-agent-memory" width="600">
   <br>
 </h1>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/pi-agent-memory">
+    <img src="https://img.shields.io/npm/v/pi-agent-memory.svg" alt="npm version">
+  </a>
+  <a href="https://github.com/thedotmack/claude-mem">
+    <img src="https://img.shields.io/github/stars/thedotmack/claude-mem?style=social&label=upstream%20claude-mem" alt="Upstream Stars">
+  </a>
+  <a href="https://github.com/thedotmack/claude-mem/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/License-AGPL%203.0-blue.svg" alt="License">
+  </a>
+</p>
+
+<h4 align="center">
+  Fork of <a href="https://github.com/thedotmack/claude-mem">claude-mem</a> — persistent memory for <a href="https://github.com/badlogic/pi-mono">pi-agents</a>.
+  <br>
+  <code>pi install npm:pi-agent-memory</code>
+</h4>
+
+<p align="center">
+  <strong><a href="pi-agent/README.md">Pi-Agent Extension Docs</a></strong> &nbsp;|&nbsp;
+  <strong><a href="https://www.npmjs.com/package/pi-agent-memory">npm</a></strong> &nbsp;|&nbsp;
+  <strong><a href="https://github.com/thedotmack/claude-mem">Upstream claude-mem</a></strong>
+</p>
+
+<hr>
 
 <p align="center">
   <a href="docs/i18n/README.zh.md">🇨🇳 中文</a> •
@@ -45,7 +65,7 @@
   <a href="docs/i18n/README.no.md">🇳🇴 Norsk</a>
 </p>
 
-<h4 align="center">Persistent memory compression system built for <a href="https://claude.com/claude-code" target="_blank">Claude Code</a>.</h4>
+<h4 align="center">Persistent memory compression system by <a href="https://github.com/thedotmack/claude-mem">claude-mem</a> — adapted for pi-agents by <a href="https://github.com/ArtemisAI">ArtemisAI</a>.</h4>
 
 <p align="center">
   <a href="LICENSE">
@@ -160,6 +180,16 @@ curl -fsSL https://install.cmem.ai/openclaw.sh | bash
 ```
 
 The installer handles dependencies, plugin setup, AI provider configuration, worker startup, and optional real-time observation feeds to Telegram, Discord, Slack, and more. See the [OpenClaw Integration Guide](https://docs.claude-mem.ai/openclaw-integration) for details.
+
+### Pi-Agent (pi-mono)
+
+Install claude-mem as a persistent memory extension for [pi-agents](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Gives any pi-mono-based agent (pi-coding-agent, OpenClaw, custom runtimes) cross-session memory. Observations are shared across all engines in the same database. See the [pi-agent README](pi-agent/README.md) for full details.
 
 **Key Features:**
 

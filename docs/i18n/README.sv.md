@@ -111,6 +111,16 @@ Starta en ny Claude Code-session i terminalen och ange följande kommandon:
 
 Starta om Claude Code. Kontext från tidigare sessioner kommer automatiskt att visas i nya sessioner.
 
+### Pi-Agent (pi-mono)
+
+Installera claude-mem som ett persistent minnestillägg för [pi-agents](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Ger alla pi-mono-baserade agenter (pi-coding-agent, OpenClaw, anpassade körtider) minne över sessioner. Observationer delas mellan alla motorer i samma databas. Se [pi-agent README](../pi-agent/README.md) för fullständiga detaljer.
+
 **Nyckelfunktioner:**
 
 - 🧠 **Persistent minne** - Kontext överlever mellan sessioner

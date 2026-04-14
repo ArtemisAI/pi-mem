@@ -110,6 +110,16 @@ Aloita uusi Claude Code -istunto terminaalissa ja syötä seuraavat komennot:
 
 Käynnistä Claude Code uudelleen. Aiempien istuntojen konteksti ilmestyy automaattisesti uusiin istuntoihin.
 
+### Pi-Agent (pi-mono)
+
+Asenna claude-mem pysyvänä muistilaajennuksena [pi-agenteille](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Antaa kaikille pi-mono-pohjaisille agenteille (pi-coding-agent, OpenClaw, mukautetut ajoympäristöt) muistin istuntojen välillä. Havainnot jaetaan kaikkien moottoreiden kesken samassa tietokannassa. Katso [pi-agent README](../pi-agent/README.md) täydellisiä tietoja varten.
+
 **Keskeiset ominaisuudet:**
 
 - 🧠 **Pysyvä muisti** - Konteksti säilyy istuntojen välillä

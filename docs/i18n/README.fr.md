@@ -111,6 +111,16 @@ Démarrez une nouvelle session Claude Code dans le terminal et saisissez les com
 
 Redémarrez Claude Code. Le contexte des sessions précédentes apparaîtra automatiquement dans les nouvelles sessions.
 
+### Pi-Agent (pi-mono)
+
+Installez claude-mem en tant qu'extension de mémoire persistante pour les [pi-agents](https://github.com/badlogic/pi-mono) :
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Offre à tout agent basé sur pi-mono (pi-coding-agent, OpenClaw, runtimes personnalisés) une mémoire inter-sessions. Les observations sont partagées entre tous les moteurs utilisant la même base de données. Consultez le [README pi-agent](../pi-agent/README.md) pour tous les détails.
+
 **Fonctionnalités clés :**
 
 - 🧠 **Mémoire persistante** - Le contexte survit d'une session à l'autre

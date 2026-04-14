@@ -110,6 +110,16 @@
 
 重新啟動 Claude Code。先前工作階段的脈絡將自動出現在新的工作階段中。
 
+### Pi-Agent（pi-mono）
+
+將 claude-mem 安裝為 [pi-agents](https://github.com/badlogic/pi-mono) 的持久記憶擴充功能：
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+為任何基於 pi-mono 的代理（pi-coding-agent、OpenClaw、自訂執行環境）提供跨工作階段的記憶功能。觀察結果會在同一資料庫中的所有引擎之間共享。完整說明請參閱 [pi-agent README](../pi-agent/README.md)。
+
 **主要功能：**
 
 - 🧠 **持久記憶** - 脈絡跨工作階段保留

@@ -110,6 +110,16 @@
 
 הפעל מחדש את Claude Code. הקשר מהפעלות קודמות יופיע אוטומטית בהפעלות חדשות.
 
+### Pi-Agent (pi-mono)
+
+התקן את claude-mem כהרחבת זיכרון מתמשך עבור [pi-agents](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+מעניק לכל סוכן מבוסס pi-mono (pi-coding-agent, OpenClaw, סביבות ריצה מותאמות אישית) זיכרון בין הפעלות. תצפיות משותפות בין כל המנועים באותה מסד נתונים. ראה את [README של pi-agent](../pi-agent/README.md) לפרטים מלאים.
+
 **תכונות עיקריות:**
 
 - 🧠 **זיכרון מתמשך** - הקשר שורד בין הפעלות

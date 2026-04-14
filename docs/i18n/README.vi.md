@@ -111,6 +111,16 @@ Bắt đầu một phiên Claude Code mới trong terminal và nhập các lện
 
 Khởi động lại Claude Code. Ngữ cảnh từ các phiên trước sẽ tự động xuất hiện trong các phiên mới.
 
+### Pi-Agent (pi-mono)
+
+Cài đặt claude-mem làm tiện mở rộng bộ nhớ liên tục cho [pi-agents](https://github.com/badlogic/pi-mono):
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+Cung cấp bộ nhớ xuyên phiên cho bất kỳ agent nào dựa trên pi-mono (pi-coding-agent, OpenClaw, custom runtimes). Các quan sát được chia sẻ trên tất cả các engine trong cùng một cơ sở dữ liệu. Xem [pi-agent README](../pi-agent/README.md) để biết chi tiết đầy đủ.
+
 **Tính Năng Chính:**
 
 - 🧠 **Bộ Nhớ Liên Tục** - Ngữ cảnh được lưu giữ qua các phiên làm việc

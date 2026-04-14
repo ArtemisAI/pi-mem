@@ -111,6 +111,16 @@
 
 Claude Codeを再起動します。以前のセッションからのコンテキストが新しいセッションに自動的に表示されます。
 
+### Pi-Agent (pi-mono)
+
+[pi-agent](https://github.com/badlogic/pi-mono)向けの永続的メモリ拡張としてclaude-memをインストールします:
+
+```bash
+pi install npm:pi-agent-memory
+```
+
+pi-monoベースのあらゆるエージェント(pi-coding-agent、OpenClaw、カスタムランタイムなど)にセッション横断メモリを付与します。観察は同一データベース内のすべてのエンジン間で共有されます。詳細は[pi-agent README](../pi-agent/README.md)を参照してください。
+
 **主な機能:**
 
 - 🧠 **永続的メモリ** - セッション間でコンテキストが保持される
