@@ -1,9 +1,11 @@
 {
   "name": "pi-agent-memory",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Persistent memory for pi-agents, powered by claude-mem (55k+ stars). Cross-session, cross-engine memory with hybrid search.",
   "keywords": [
     "pi-package",
+    "pi-extension",
+    "pi-skill",
     "claude-mem",
     "pi-agent",
     "pi-coding-agent",
