@@ -1,0 +1,3 @@
+# claude-mem credentials for containerized worker
+# This file is mounted read-only into the container
+OPENROUTER_API_KEY=sk-LQs8SFJfeFtT4wjtHEXiBuzVF4wxq3ajtjYjAWmZaml7pXKp
