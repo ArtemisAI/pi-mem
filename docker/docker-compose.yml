@@ -1,0 +1,62 @@
+# claude-mem centralized worker
+# Deploy on brain (ARM64, 16GB, NVMe) — all workstations connect via Tailscale
+#
+# Usage:
+#   docker compose up -d          # start
+#   docker compose logs -f        # watch logs
+#   docker compose down           # stop
+#   docker compose up -d --build  # rebuild after code changes
+
+services:
+  claude-mem-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: claude-mem-worker
+    restart: unless-stopped
+
+    ports:
+      - "37777:37777"
+
+    volumes:
+      # Persistent data — SQLite DB, Chroma vectors, logs, settings
+      - claude-mem-data:/data/claude-mem
+      # Settings file (mount from host for easy editing)
+      - ./settings.json:/data/claude-mem/settings.json:ro
+      # Credentials (API keys)
+      - ./env:/data/claude-mem/.env:ro
+
+    environment:
+      - CLAUDE_MEM_DATA_DIR=/data/claude-mem
+      - CLAUDE_MEM_WORKER_HOST=0.0.0.0
+      - CLAUDE_MEM_WORKER_PORT=37777
+      - CLAUDE_MEM_PROVIDER=openrouter
+      - CLAUDE_MEM_MAX_CONCURRENT_AGENTS=2
+      - CLAUDE_MEM_MANAGED=true
+
+    # Resource limits — claude-mem is lightweight
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+        reservations:
+          memory: 256M
+          cpus: "0.5"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:37777/api/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  claude-mem-data:
+    driver: local
