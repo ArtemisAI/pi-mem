@@ -4,9 +4,22 @@ This guide gets a new machine connected to the centralized claude-mem worker in 
 
 ## Prerequisites
 
+- Machine has **Bun** installed (`bun --version`) — hooks fail without it
 - Machine has **Claude Code** installed (`claude --version`)
 - Machine is on the **Tailscale** mesh (`tailscale status`)
 - You can reach the worker: `curl -s http://100.89.23.33:37777/api/health`
+
+## Step 0: Install Bun (required)
+
+Bun is a mandatory dependency — claude-mem hooks run via Bun. Without it, every hook fires and fails with "Bun not found."
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+source ~/.bashrc
+bun --version  # should show 1.x
+```
+
+> **Note:** Some systems may need `unzip` first: `sudo apt-get install -y unzip`
 
 ## Step 1: Install claude-mem hooks
 
