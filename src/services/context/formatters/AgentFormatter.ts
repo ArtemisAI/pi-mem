@@ -132,8 +132,9 @@ export function renderAgentTableRow(
   const title = obs.title || 'Untitled';
   const icon = ModeManager.getInstance().getTypeIcon(obs.type);
   const time = timeDisplay ? compactTime(timeDisplay) : '"';
+  const node = obs.node_source && obs.node_source !== 'unknown' ? ` [${obs.node_source}]` : '';
 
-  return `${obs.id} ${time} ${icon} ${title}`;
+  return `${obs.id} ${time} ${icon}${node} ${title}`;
 }
 
 /**
