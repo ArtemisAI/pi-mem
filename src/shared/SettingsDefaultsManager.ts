@@ -26,11 +26,17 @@ export interface SettingsDefaults {
   CLAUDE_MEM_GEMINI_MAX_CONTEXT_MESSAGES: string;  // Max messages in Gemini context window (prevents O(N²) cost growth)
   CLAUDE_MEM_GEMINI_MAX_TOKENS: string;  // Max estimated tokens for Gemini context (~100k safety limit)
   CLAUDE_MEM_OPENROUTER_API_KEY: string;
+  CLAUDE_MEM_OPENROUTER_BASE_URL: string;  // OpenAI-compatible endpoint URL (for self-hosted models)
   CLAUDE_MEM_OPENROUTER_MODEL: string;
   CLAUDE_MEM_OPENROUTER_SITE_URL: string;
   CLAUDE_MEM_OPENROUTER_APP_NAME: string;
   CLAUDE_MEM_OPENROUTER_MAX_CONTEXT_MESSAGES: string;
   CLAUDE_MEM_OPENROUTER_MAX_TOKENS: string;
+  CLAUDE_MEM_OPENROUTER_TEMPERATURE: string;     // Inference temperature (0-2)
+  CLAUDE_MEM_OPENROUTER_MAX_OUTPUT_TOKENS: string;  // Max tokens in completion response
+  CLAUDE_MEM_OPENROUTER_FALLBACK_URL: string;       // Fallback endpoint if primary fails
+  CLAUDE_MEM_OPENROUTER_FALLBACK_KEY: string;       // API key for fallback endpoint
+  CLAUDE_MEM_OPENROUTER_FALLBACK_MODEL: string;     // Model for fallback endpoint
   // System Configuration
   CLAUDE_MEM_DATA_DIR: string;
   CLAUDE_MEM_LOG_LEVEL: string;
@@ -97,11 +103,17 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_GEMINI_MAX_CONTEXT_MESSAGES: '20',  // Max messages in Gemini context window
     CLAUDE_MEM_GEMINI_MAX_TOKENS: '100000',  // Max estimated tokens (~100k safety limit)
     CLAUDE_MEM_OPENROUTER_API_KEY: '',  // Empty by default, can be set via UI or env
+    CLAUDE_MEM_OPENROUTER_BASE_URL: 'https://openrouter.ai/api/v1/chat/completions',  // Override for local/compatible servers
     CLAUDE_MEM_OPENROUTER_MODEL: 'xiaomi/mimo-v2-flash:free',  // Default OpenRouter model (free tier)
     CLAUDE_MEM_OPENROUTER_SITE_URL: '',  // Optional: for OpenRouter analytics
     CLAUDE_MEM_OPENROUTER_APP_NAME: 'claude-mem',  // App name for OpenRouter analytics
     CLAUDE_MEM_OPENROUTER_MAX_CONTEXT_MESSAGES: '20',  // Max messages in context window
     CLAUDE_MEM_OPENROUTER_MAX_TOKENS: '100000',  // Max estimated tokens (~100k safety limit)
+    CLAUDE_MEM_OPENROUTER_TEMPERATURE: '0.3',  // Inference temperature for structured extraction
+    CLAUDE_MEM_OPENROUTER_MAX_OUTPUT_TOKENS: '4096',  // Max tokens in completion response
+    CLAUDE_MEM_OPENROUTER_FALLBACK_URL: '',          // Empty = no fallback
+    CLAUDE_MEM_OPENROUTER_FALLBACK_KEY: '',
+    CLAUDE_MEM_OPENROUTER_FALLBACK_MODEL: '',         // Empty = use primary model
     // System Configuration
     CLAUDE_MEM_DATA_DIR: join(homedir(), '.claude-mem'),
     CLAUDE_MEM_LOG_LEVEL: 'INFO',
