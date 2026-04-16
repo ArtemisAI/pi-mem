@@ -12,6 +12,7 @@ import { isProjectExcluded } from '../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { hostname } from 'os';
 
 export const observationHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -54,6 +55,7 @@ export const observationHandler: EventHandler = {
         body: JSON.stringify({
           contentSessionId: sessionId,
           platformSource,
+          nodeSource: hostname(),
           tool_name: toolName,
           tool_input: toolInput,
           tool_response: toolResponse,

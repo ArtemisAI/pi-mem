@@ -13,6 +13,7 @@ import { isProjectExcluded } from '../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { hostname } from 'os';
 
 export const sessionInitHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -55,7 +56,8 @@ export const sessionInitHandler: EventHandler = {
         contentSessionId: sessionId,
         project,
         prompt,
-        platformSource
+        platformSource,
+        nodeSource: hostname()
       })
     });
 

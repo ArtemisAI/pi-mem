@@ -10,6 +10,7 @@ import { ensureWorkerRunning, workerHttpRequest } from '../../shared/worker-util
 import { logger } from '../../utils/logger.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { hostname } from 'os';
 
 export const fileEditHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -45,6 +46,7 @@ export const fileEditHandler: EventHandler = {
         body: JSON.stringify({
           contentSessionId: sessionId,
           platformSource,
+          nodeSource: hostname(),
           tool_name: 'write_file',
           tool_input: { filePath, edits },
           tool_response: { success: true },

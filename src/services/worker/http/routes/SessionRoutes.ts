@@ -507,6 +507,7 @@ export class SessionRoutes extends BaseRouteHandler {
   private handleObservationsByClaudeId = this.wrapHandler((req: Request, res: Response): void => {
     const { contentSessionId, tool_name, tool_input, tool_response, cwd } = req.body;
     const platformSource = normalizePlatformSource(req.body.platformSource);
+    const nodeSource = req.body.nodeSource || undefined;
     const project = typeof cwd === 'string' && cwd.trim() ? getProjectName(cwd) : '';
 
     if (!contentSessionId) {
@@ -542,7 +543,7 @@ export class SessionRoutes extends BaseRouteHandler {
       const store = this.dbManager.getSessionStore();
 
       // Get or create session
-      const sessionDbId = store.createSDKSession(contentSessionId, project, '', undefined, platformSource);
+      const sessionDbId = store.createSDKSession(contentSessionId, project, '', undefined, platformSource, nodeSource);
       const promptNumber = store.getPromptNumberFromUserPrompts(contentSessionId);
 
       // Privacy check: skip if user prompt was entirely private
@@ -607,6 +608,7 @@ export class SessionRoutes extends BaseRouteHandler {
   private handleSummarizeByClaudeId = this.wrapHandler((req: Request, res: Response): void => {
     const { contentSessionId, last_assistant_message } = req.body;
     const platformSource = normalizePlatformSource(req.body.platformSource);
+    const nodeSource = req.body.nodeSource || undefined;
 
     if (!contentSessionId) {
       return this.badRequest(res, 'Missing contentSessionId');
@@ -615,7 +617,7 @@ export class SessionRoutes extends BaseRouteHandler {
     const store = this.dbManager.getSessionStore();
 
     // Get or create session
-    const sessionDbId = store.createSDKSession(contentSessionId, '', '', undefined, platformSource);
+    const sessionDbId = store.createSDKSession(contentSessionId, '', '', undefined, platformSource, nodeSource);
     const promptNumber = store.getPromptNumberFromUserPrompts(contentSessionId);
 
     // Privacy check: skip if user prompt was entirely private
@@ -689,6 +691,7 @@ export class SessionRoutes extends BaseRouteHandler {
   private handleCompleteByClaudeId = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {
     const { contentSessionId } = req.body;
     const platformSource = normalizePlatformSource(req.body.platformSource);
+    const nodeSource = req.body.nodeSource || undefined;
 
     logger.info('HTTP', '→ POST /api/sessions/complete', { contentSessionId });
 
@@ -700,7 +703,7 @@ export class SessionRoutes extends BaseRouteHandler {
 
     // Look up sessionDbId from contentSessionId (createSDKSession is idempotent)
     // Pass empty strings - we only need the ID lookup, not to create a new session
-    const sessionDbId = store.createSDKSession(contentSessionId, '', '', undefined, platformSource);
+    const sessionDbId = store.createSDKSession(contentSessionId, '', '', undefined, platformSource, nodeSource);
 
     // Check if session is in the active sessions map
     const activeSession = this.sessionManager.getSession(sessionDbId);
@@ -747,6 +750,7 @@ export class SessionRoutes extends BaseRouteHandler {
     const prompt = req.body.prompt || '[media prompt]';
     const platformSource = normalizePlatformSource(req.body.platformSource);
     const customTitle = req.body.customTitle || undefined;
+    const nodeSource = req.body.nodeSource || undefined;
 
     logger.info('HTTP', 'SessionRoutes: handleSessionInitByClaudeId called', {
       contentSessionId,
@@ -764,7 +768,7 @@ export class SessionRoutes extends BaseRouteHandler {
     const store = this.dbManager.getSessionStore();
 
     // Step 1: Create/get SDK session (idempotent INSERT OR IGNORE)
-    const sessionDbId = store.createSDKSession(contentSessionId, project, prompt, customTitle, platformSource);
+    const sessionDbId = store.createSDKSession(contentSessionId, project, prompt, customTitle, platformSource, nodeSource);
 
     // Verify session creation with DB lookup
     const dbSession = store.getSessionById(sessionDbId);
