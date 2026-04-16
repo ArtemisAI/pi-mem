@@ -1,94 +1,144 @@
-# Claude-Mem: AI Development Instructions
+# CLAUDE.md
 
-Claude-mem is a Claude Code plugin providing persistent memory across sessions. It captures tool usage, compresses observations using the Claude Agent SDK, and injects relevant context into future sessions.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Architecture
+## What This Is
 
-**5 Lifecycle Hooks**: SessionStart → UserPromptSubmit → PostToolUse → Summary → SessionEnd
-
-**Hooks** (`src/hooks/*.ts`) - TypeScript → ESM, built to `plugin/scripts/*-hook.js`
-
-**Worker Service** (`src/services/worker-service.ts`) - Express API on port 37777, Bun-managed, handles AI processing asynchronously
-
-**Database** (`src/services/sqlite/`) - SQLite3 at `~/.claude-mem/claude-mem.db`
-
-**Search Skill** (`plugin/skills/mem-search/SKILL.md`) - HTTP API for searching past work, auto-invoked when users ask about history
-
-**Planning Skill** (`plugin/skills/make-plan/SKILL.md`) - Orchestrator instructions for creating phased implementation plans with documentation discovery
-
-**Execution Skill** (`plugin/skills/do/SKILL.md`) - Orchestrator instructions for executing phased plans using subagents
-
-**Chroma** (`src/services/sync/ChromaSync.ts`) - Vector embeddings for semantic search
-
-**Viewer UI** (`src/ui/viewer/`) - React interface at http://localhost:37777, built to `plugin/ui/viewer.html`
-
-## Privacy Tags
-- `<private>content</private>` - User-level privacy control (manual, prevents storage)
-
-**Implementation**: Tag stripping happens at hook layer (edge processing) before data reaches worker/database. See `src/utils/tag-stripping.ts` for shared utilities.
+Claude-mem is a Claude Code plugin providing persistent memory across sessions. It captures tool usage, compresses observations using AI, and injects relevant context into future sessions. Supports Claude Code, Gemini CLI, Cursor, OpenClaw, and pi-agents.
 
 ## Build Commands
 
 ```bash
-npm run build-and-sync        # Build, sync to marketplace, restart worker
+npm run build-and-sync        # Build TypeScript + hooks, sync to marketplace, restart worker
+npm run build                 # Build only (no sync/restart)
+bun test                      # Run test suite
+npm run worker:start          # Start worker daemon
+npm run worker:stop           # Stop worker daemon
+npm run worker:restart        # Restart worker daemon
 ```
 
-## Configuration
+Single test: `bun test tests/path/to/test.test.ts`
 
-Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created with defaults on first run.
+## Architecture
+
+### Data Flow: Hook → Worker → Database
+
+```
+Claude Code session
+  │
+  ├─ SessionStart hook ──→ GET /api/context/inject ──→ context injected to LLM
+  ├─ UserPromptSubmit ───→ POST /api/sessions/init ──→ session created in SQLite
+  ├─ PostToolUse ────────→ POST /api/sessions/observations ──→ queued for AI processing
+  ├─ Stop ───────────────→ POST /api/sessions/summarize ──→ session summary generated
+  └─ SessionEnd ─────────→ POST /api/sessions/complete ──→ session closed
+```
+
+Hooks (`src/cli/handlers/`) are TypeScript compiled to CJS, run by Bun. They communicate with the worker via HTTP on localhost:37777 (or remote worker in distributed mode).
+
+### Worker Service
+
+`src/services/worker-service.ts` — Express API orchestrator. Delegates to:
+
+- **SessionRoutes** (`src/services/worker/http/routes/SessionRoutes.ts`) — session lifecycle, observation queueing
+- **SearchRoutes** — hybrid FTS5 + Chroma search
+- **SettingsRoutes** — user configuration CRUD with validation
+- **DataRoutes, ViewerRoutes, LogsRoutes** — supporting endpoints
+
+### AI Provider System (Observer Agents)
+
+Three interchangeable providers process observations into structured XML:
+
+| Provider | File | Binary needed? | Auth |
+|---|---|---|---|
+| Claude SDK | `src/services/worker/SDKAgent.ts` | Yes (`claude` binary) | CLI subscription or API key |
+| Gemini | `src/services/worker/GeminiAgent.ts` | No | `GEMINI_API_KEY` |
+| OpenRouter | `src/services/worker/OpenRouterAgent.ts` | No | `OPENROUTER_API_KEY` |
+
+Selected via `CLAUDE_MEM_PROVIDER` setting. All agents are **observer-only** (no tool execution) to prevent loops.
+
+OpenRouter supports configurable endpoint (`CLAUDE_MEM_OPENROUTER_BASE_URL`) and fallback chain (`CLAUDE_MEM_OPENROUTER_FALLBACK_URL/KEY/MODEL`) for resilience.
+
+### Database Layer
+
+`src/services/sqlite/SessionStore.ts` (~2400 lines) — core persistence with inline migrations (currently at migration 27). Uses `bun:sqlite` (not better-sqlite3).
+
+Key tables: `sdk_sessions`, `observations`, `session_summaries`, `user_prompts`. Observations are joined to sessions via `memory_session_id` for platform/node source attribution.
+
+### Context Injection Pipeline
+
+`src/services/context/` — assembles context from observations + summaries:
+
+1. **ObservationCompiler.ts** — SQL queries with type/concept/platform filtering
+2. **AgentFormatter.ts** — compact flat-line format optimized for token efficiency
+3. Progressive disclosure: IDs in timeline → `get_observations([IDs])` for details
+
+### Build Pipeline
+
+```
+src/cli/handlers/*.ts ──→ esbuild ──→ plugin/scripts/*.cjs
+src/services/worker-service.ts ──→ esbuild ──→ plugin/scripts/worker-service.cjs
+src/servers/mcp-server.ts ──→ esbuild ──→ plugin/scripts/mcp-server.cjs
+src/ui/viewer/ ──→ esbuild ──→ plugin/ui/viewer-bundle.js
+```
+
+Built artifacts in `plugin/` are committed (they ship to users). Always rebuild after source changes: `npm run build-and-sync`.
+
+## Distributed Memory Network
+
+Claude-mem supports a centralized worker serving multiple machines:
+
+- **Server** (brain): runs worker on `0.0.0.0:37777` via systemd, stores SQLite + Chroma
+- **Clients**: hooks send observations to remote worker via `CLAUDE_MEM_WORKER_HOST` setting
+- **Node tagging**: observations tagged with `node_source` (hostname) via migration 27
+- **Fallback chain**: primary endpoint → fallback endpoint → abandon (configurable)
+
+Client setup: `CLAUDE_MEM_WORKER_HOST=<server-ip>` in `~/.claude-mem/settings.json`
 
 ## File Locations
 
-- **Source**: `<project-root>/src/`
-- **Built Plugin**: `<project-root>/plugin/`
-- **Installed Plugin**: `~/.claude/plugins/marketplaces/thedotmack/`
+- **Source**: `src/`
+- **Built Plugin**: `plugin/`
+- **Installed Plugin**: `~/.claude/plugins/marketplaces/thedotmack/` or `~/.claude/plugins/cache/thedotmack/claude-mem/<version>/`
 - **Database**: `~/.claude-mem/claude-mem.db`
+- **Credentials**: `~/.claude-mem/.env` (isolated from project .env — Issue #733)
+- **Settings**: `~/.claude-mem/settings.json`
+- **Logs**: `~/.claude-mem/logs/claude-mem-YYYY-MM-DD.log`
 - **Chroma**: `~/.claude-mem/chroma/`
 
-## Exit Code Strategy
+## Settings System
 
-Claude-mem hooks use specific exit codes per Claude Code's hook contract:
+`src/shared/SettingsDefaultsManager.ts` — single source of truth for all defaults. Priority: environment variable > settings.json > hardcoded default.
 
-- **Exit 0**: Success or graceful shutdown (Windows Terminal closes tabs)
-- **Exit 1**: Non-blocking error (stderr shown to user, continues)
-- **Exit 2**: Blocking error (stderr fed to Claude for processing)
+All settings prefixed `CLAUDE_MEM_*`. Key groups: provider config, context display, feature toggles, process management, Chroma config.
 
-**Philosophy**: Worker/hook errors exit with code 0 to prevent Windows Terminal tab accumulation. The wrapper/plugin layer handles restart logic. ERROR-level logging is maintained for diagnostics.
+Adding a new setting: update interface + DEFAULTS in SettingsDefaultsManager, add to settingKeys array + validation in SettingsRoutes.
 
-See `private/context/claude-code/exit-codes.md` for full hook behavior matrix.
+## Privacy
 
-## Requirements
+`<private>content</private>` tags prevent storage. Stripping happens at hook layer (`src/utils/tag-stripping.ts`) before data reaches worker.
 
-- **Bun** (all platforms - auto-installed if missing)
-- **uv** (all platforms - auto-installed if missing, provides Python for Chroma)
-- Node.js
+## Exit Codes
+
+- **Exit 0**: Success or graceful shutdown
+- **Exit 1**: Non-blocking error (shown to user)
+- **Exit 2**: Blocking error (fed to Claude)
+
+Worker/hook errors use exit 0 to prevent Windows Terminal tab accumulation.
+
+## Key Conventions
+
+- Changelog is auto-generated — never edit manually
+- Database migrations are inline in SessionStore constructor, not separate files
+- `memory_session_id` must NEVER equal `contentSessionId` (prevents transcript injection)
+- Hooks run under Bun; Bun must be in `/usr/local/bin/` for non-interactive shells
+- `plugin/scripts/*.cjs` are built artifacts — edit source in `src/`, then rebuild
+- All provider credentials go in `~/.claude-mem/.env`, never in project .env files
+
+## Pi-Agent Extension
+
+`pi-agent/` — extends pi-mono agents with persistent memory. Published as `pi-agent-memory` on npm. Shares the same worker API as Claude Code hooks.
 
 ## Documentation
 
-**Public Docs**: https://docs.claude-mem.ai (Mintlify)
-**Source**: `docs/public/` - MDX files, edit `docs.json` for navigation
-**Deploy**: Auto-deploys from GitHub on push to main
-
-## Pro Features Architecture
-
-Claude-mem is designed with a clean separation between open-source core functionality and optional Pro features.
-
-**Open-Source Core** (this repository):
-
-- All worker API endpoints on localhost:37777 remain fully open and accessible
-- Pro features are headless - no proprietary UI elements in this codebase
-- Pro integration points are minimal: settings for license keys, tunnel provisioning logic
-- The architecture ensures Pro features extend rather than replace core functionality
-
-**Pro Features** (coming soon, external):
-
-- Enhanced UI (Memory Stream) connects to the same localhost:37777 endpoints as the open viewer
-- Additional features like advanced filtering, timeline scrubbing, and search tools
-- Access gated by license validation, not by modifying core endpoints
-- Users without Pro licenses continue using the full open-source viewer UI without limitation
-
-This architecture preserves the open-source nature of the project while enabling sustainable development through optional paid features.
-
-## Important
-
-No need to edit the changelog ever, it's generated automatically.
+- **Public**: https://docs.claude-mem.ai (source: `docs/public/`, Mintlify)
+- **Client guide**: `docs/mem-net-client-guide.md` (distributed setup)
