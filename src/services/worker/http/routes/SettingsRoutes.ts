@@ -106,6 +106,9 @@ export class SettingsRoutes extends BaseRouteHandler {
       'CLAUDE_MEM_OPENROUTER_MAX_TOKENS',
       'CLAUDE_MEM_OPENROUTER_TEMPERATURE',
       'CLAUDE_MEM_OPENROUTER_MAX_OUTPUT_TOKENS',
+      'CLAUDE_MEM_OPENROUTER_FALLBACK_URL',
+      'CLAUDE_MEM_OPENROUTER_FALLBACK_KEY',
+      'CLAUDE_MEM_OPENROUTER_FALLBACK_MODEL',
       // System Configuration
       'CLAUDE_MEM_DATA_DIR',
       'CLAUDE_MEM_LOG_LEVEL',
@@ -400,6 +403,16 @@ export class SettingsRoutes extends BaseRouteHandler {
       const tokens = parseInt(settings.CLAUDE_MEM_OPENROUTER_MAX_OUTPUT_TOKENS, 10);
       if (isNaN(tokens) || tokens < 1 || tokens > 128000) {
         return { valid: false, error: 'CLAUDE_MEM_OPENROUTER_MAX_OUTPUT_TOKENS must be between 1 and 128000' };
+      }
+    }
+
+    // Validate CLAUDE_MEM_OPENROUTER_FALLBACK_URL if provided
+    if (settings.CLAUDE_MEM_OPENROUTER_FALLBACK_URL) {
+      try {
+        new URL(settings.CLAUDE_MEM_OPENROUTER_FALLBACK_URL);
+      } catch (error) {
+        logger.debug('SETTINGS', 'Invalid FALLBACK_URL format', { url: settings.CLAUDE_MEM_OPENROUTER_FALLBACK_URL, error: error instanceof Error ? error.message : String(error) });
+        return { valid: false, error: 'CLAUDE_MEM_OPENROUTER_FALLBACK_URL must be a valid URL' };
       }
     }
 
