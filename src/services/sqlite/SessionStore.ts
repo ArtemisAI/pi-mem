@@ -65,6 +65,7 @@ export class SessionStore {
     this.addSessionCustomTitleColumn();
     this.addSessionPlatformSourceColumn();
     this.addObservationModelColumns();
+    this.addSessionNodeSourceColumn();
   }
 
   /**
@@ -945,6 +946,37 @@ export class SessionStore {
   }
 
   /**
+   * Add node_source column to sdk_sessions for multi-machine memory network (migration 27)
+   * Tracks which machine/node generated the observations in a centralized deployment.
+   */
+  private addSessionNodeSourceColumn(): void {
+    const tableInfo = this.db.query('PRAGMA table_info(sdk_sessions)').all() as TableColumnInfo[];
+    const hasColumn = tableInfo.some(col => col.name === 'node_source');
+    const indexInfo = this.db.query('PRAGMA index_list(sdk_sessions)').all() as IndexInfo[];
+    const hasIndex = indexInfo.some(index => index.name === 'idx_sdk_sessions_node_source');
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(27) as SchemaVersion | undefined;
+
+    if (applied && hasColumn && hasIndex) return;
+
+    if (!hasColumn) {
+      this.db.run("ALTER TABLE sdk_sessions ADD COLUMN node_source TEXT NOT NULL DEFAULT 'unknown'");
+      logger.debug('DB', 'Added node_source column to sdk_sessions table');
+    }
+
+    this.db.run(`
+      UPDATE sdk_sessions
+      SET node_source = 'unknown'
+      WHERE node_source IS NULL OR node_source = ''
+    `);
+
+    if (!hasIndex) {
+      this.db.run('CREATE INDEX IF NOT EXISTS idx_sdk_sessions_node_source ON sdk_sessions(node_source)');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(27, new Date().toISOString());
+  }
+
+  /**
    * Update the memory session ID for a session
    * Called by SDKAgent when it captures the session ID from the first SDK message
    * Also used to RESET to null on stale resume failures (worker-service.ts)
@@ -1584,7 +1616,8 @@ export class SessionStore {
     project: string,
     userPrompt: string,
     customTitle?: string,
-    platformSource?: string
+    platformSource?: string,
+    nodeSource?: string
   ): number {
     const now = new Date();
     const nowEpoch = now.getTime();
@@ -1612,6 +1645,14 @@ export class SessionStore {
         `).run(resolved.customTitle, contentSessionId);
       }
 
+      // Backfill node_source if provided and not yet set
+      if (nodeSource) {
+        this.db.prepare(`
+          UPDATE sdk_sessions SET node_source = ?
+          WHERE content_session_id = ? AND (node_source IS NULL OR node_source = '' OR node_source = 'unknown')
+        `).run(nodeSource, contentSessionId);
+      }
+
       if (resolved.platformSource) {
         const storedPlatformSource = existing.platform_source?.trim()
           ? normalizePlatformSource(existing.platform_source)
@@ -1636,11 +1677,12 @@ export class SessionStore {
     // NOTE: memory_session_id starts as NULL. It is captured by SDKAgent from the first SDK
     // response and stored via ensureMemorySessionIdRegistered(). CRITICAL: memory_session_id
     // must NEVER equal contentSessionId - that would inject memory messages into the user's transcript!
+    const resolvedNodeSource = nodeSource || 'unknown';
     this.db.prepare(`
       INSERT INTO sdk_sessions
-      (content_session_id, memory_session_id, project, platform_source, user_prompt, custom_title, started_at, started_at_epoch, status)
-      VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'active')
-    `).run(contentSessionId, project, normalizedPlatformSource, userPrompt, resolved.customTitle || null, now.toISOString(), nowEpoch);
+      (content_session_id, memory_session_id, project, platform_source, node_source, user_prompt, custom_title, started_at, started_at_epoch, status)
+      VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, 'active')
+    `).run(contentSessionId, project, normalizedPlatformSource, resolvedNodeSource, userPrompt, resolved.customTitle || null, now.toISOString(), nowEpoch);
 
     // Return new ID
     const row = this.db.prepare('SELECT id FROM sdk_sessions WHERE content_session_id = ?')
