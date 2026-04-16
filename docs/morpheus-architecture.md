@@ -1,7 +1,7 @@
-# Kairos: Claude Code's Autonomous Agent Architecture
+# Project Morpheus: Memory Intelligence Architecture
 
-> Source analysis from the March 31, 2026 Claude Code source map leak.
-> All file paths reference `/source/claude-code/src/` within the leaked codebase.
+> Clean-room analysis of memory consolidation patterns in agentic systems.
+> Source file paths reference the Claude Code March 2026 leak for architectural context only.
 
 ---
 
@@ -637,3 +637,102 @@ Raw signals → Append-only log → AI consolidation → Indexed store → Conte
 | `utils/cronTasks.ts` | — | Cron-based autonomous triggers |
 | `tools/RemoteTriggerTool/RemoteTriggerTool.ts` | — | Cloud-based scheduled agents |
 | `tasks/DreamTask/DreamTask.ts` | 159 | Dream task UI state + kill handling |
+
+---
+
+## Project Morpheus: Implementation Roadmap
+
+Project Morpheus brings clean-room memory intelligence to claude-mem, addressing the missing post-storage intelligence layer. All issues tracked at [ArtemisAI/pi-mem-dev](https://github.com/ArtemisAI/pi-mem-dev).
+
+### Issue Map
+
+| # | Issue | Concept Origin | Effort | Impact |
+|---|-------|---------------|--------|--------|
+| [#6](https://github.com/ArtemisAI/pi-mem-dev/issues/6) | Quality Gating | "What NOT to save" taxonomy | Low | High |
+| [#7](https://github.com/ArtemisAI/pi-mem-dev/issues/7) | Semantic Dedup | Merge into existing rather than creating near-duplicates | Low | High |
+| [#8](https://github.com/ArtemisAI/pi-mem-dev/issues/8) | Contradiction Detection | Delete contradicted facts, fix at source | Low | Medium |
+| [#9](https://github.com/ArtemisAI/pi-mem-dev/issues/9) | Staleness Scoring | Time-aware relevance decay with type weighting | Medium | High |
+| [#10](https://github.com/ArtemisAI/pi-mem-dev/issues/10) | Consolidation Job | Orient-Gather-Consolidate-Prune batch pipeline | High | Highest |
+| [#11](https://github.com/ArtemisAI/pi-mem-dev/issues/11) | Date Normalization | Convert relative dates to absolute at storage time | Low | Low |
+| [#12](https://github.com/ArtemisAI/pi-mem-dev/issues/12) | Session Retrospective | End-of-session "what went wrong" meta-learning | Medium | Medium |
+
+### Dependency Graph
+
+```
+Quality Gating (#6) ──────────────┐
+Date Normalization (#11) ─────────┤
+                                  ├── Semantic Dedup (#7)
+Contradiction Detection (#8) ─────┤
+                                  ├── Staleness Scoring (#9)
+                                  │
+                                  └── Consolidation Job (#10)
+
+Session Retrospective (#12) ──────── (independent, parallel track)
+```
+
+### Implementation Phases
+
+**Phase A — Foundation (low effort, immediate gains):**
+- #6 Quality Gating + #11 Date Normalization + #8 Contradiction Detection
+- These are all changes to `ResponseProcessor.ts` and `sdk/prompts.ts`
+- Can be implemented together in a single PR
+- Expected: ~30% observation volume reduction, elimination of contradicted-fact poisoning
+
+**Phase B — Intelligence (medium effort):**
+- #7 Semantic Dedup + #9 Staleness Scoring
+- Requires migration 26 (shared across both)
+- Depends on Chroma being healthy (`queryChroma()` integration)
+- Expected: context injection returns 2-3x more relevant observations
+
+**Phase C — Consolidation (high effort, capstone):**
+- #10 Periodic Consolidation Job
+- New `ConsolidationService` with its own migration (27)
+- Builds on all Phase A and B features
+- Expected: 5-10x reduction in observation count for mature projects
+
+**Phase D — Meta-Learning (parallel track):**
+- #12 Session Retrospective
+- Independent of Phases A-C, can be developed in parallel
+- New observation type + prompt + PendingMessageStore extension
+
+### Schema Migrations
+
+**Migration 26** (shared across Phase A + B):
+```sql
+-- Contradiction Detection (#8)
+ALTER TABLE observations ADD COLUMN superseded_by INTEGER REFERENCES observations(id);
+ALTER TABLE observations ADD COLUMN superseded_at TEXT;
+ALTER TABLE observations ADD COLUMN superseded_reason TEXT;
+
+-- Staleness Scoring (#9)
+ALTER TABLE observations ADD COLUMN relevance_score REAL DEFAULT 1.0;
+CREATE INDEX idx_observations_relevance ON observations(relevance_score DESC);
+
+-- Semantic Dedup (#7)
+ALTER TABLE observations ADD COLUMN updated_at TEXT;
+ALTER TABLE observations ADD COLUMN merge_count INTEGER DEFAULT 0;
+```
+
+**Migration 27** (Phase C):
+```sql
+ALTER TABLE observations ADD COLUMN consolidated_into INTEGER REFERENCES observations(id);
+ALTER TABLE observations ADD COLUMN is_consolidated_digest BOOLEAN DEFAULT 0;
+
+CREATE TABLE consolidation_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project TEXT NOT NULL,
+  observations_input INTEGER NOT NULL,
+  observations_output INTEGER NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  created_at_epoch INTEGER NOT NULL
+);
+```
+
+### Cross-References to Upstream
+
+| Morpheus Issue | Upstream Issue | Relationship |
+|---------------|----------------|--------------|
+| #10 Consolidation | thedotmack/claude-mem#2005 Compiled Truth | Direct implementation path |
+| #9 Staleness | thedotmack/claude-mem#2014 Thompson Sampling | Complementary scoring |
+| #7 Semantic Dedup | thedotmack/claude-mem#2003 Entity Detection | Shared vector infrastructure |
