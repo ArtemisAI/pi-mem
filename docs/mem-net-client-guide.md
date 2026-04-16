@@ -14,12 +14,17 @@ This guide gets a new machine connected to the centralized claude-mem worker in 
 Bun is a mandatory dependency — claude-mem hooks run via Bun. Without it, every hook fires and fails with "Bun not found."
 
 ```bash
+# Install (may need: sudo apt-get install -y unzip)
 curl -fsSL https://bun.sh/install | bash
 source ~/.bashrc
+
+# CRITICAL: symlink so Claude Code hooks find bun
+# Hooks run in non-interactive shells that don't source .bashrc
+sudo ln -sf ~/.bun/bin/bun /usr/local/bin/bun
+sudo ln -sf ~/.bun/bin/bunx /usr/local/bin/bunx
+
 bun --version  # should show 1.x
 ```
-
-> **Note:** Some systems may need `unzip` first: `sudo apt-get install -y unzip`
 
 ## Step 1: Install claude-mem hooks
 
