@@ -18,6 +18,7 @@ import { updateFolderClaudeMdFiles } from '../../../utils/claude-md-utils.js';
 import { getWorkerPort } from '../../../shared/worker-utils.js';
 import { SettingsDefaultsManager } from '../../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../../shared/paths.js';
+import { normalizeObservationDates } from '../../../utils/date-normalization.js';
 import type { ActiveSession } from '../../worker-types.js';
 import type { DatabaseManager } from '../DatabaseManager.js';
 import type { SessionManager } from '../SessionManager.js';
@@ -66,7 +67,9 @@ export async function processAgentResponse(
   }
 
   // Parse observations and summary
-  const observations = parseObservations(text, session.contentSessionId);
+  const observations = normalizeObservationDates(
+    parseObservations(text, session.contentSessionId)
+  );
   const summary = parseSummary(text, session.sessionDbId);
 
   if (

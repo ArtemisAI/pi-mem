@@ -31,6 +31,7 @@ mock.module('../../../src/services/domain/ModeManager.js', () => ({
 
 // Import after mocks
 import { processAgentResponse } from '../../../src/services/worker/agents/ResponseProcessor.js';
+import { normalizeRelativeDates } from '../../../src/utils/date-normalization.js';
 import type { WorkerRef, StorageResult } from '../../../src/services/worker/agents/types.js';
 import type { ActiveSession } from '../../../src/services/worker-types.js';
 import type { DatabaseManager } from '../../../src/services/worker/DatabaseManager.js';
@@ -209,6 +210,43 @@ describe('ResponseProcessor', () => {
       expect(observations).toHaveLength(2);
       expect(observations[0].type).toBe('discovery');
       expect(observations[1].type).toBe('bugfix');
+    });
+
+    it('should normalize relative dates in title, narrative, and facts before storage', async () => {
+      const session = createMockSession();
+      const responseText = `
+        <observation>
+          <type>discovery</type>
+          <title>Yesterday deployment issue</title>
+          <narrative>last week we changed this flow</narrative>
+          <facts>
+            <fact>Reproduced yesterday</fact>
+            <fact>Root cause from last week release</fact>
+          </facts>
+          <concepts></concepts>
+          <files_read></files_read>
+          <files_modified></files_modified>
+        </observation>
+      `;
+
+      await processAgentResponse(
+        responseText,
+        session,
+        mockDbManager,
+        mockSessionManager,
+        mockWorker,
+        100,
+        null,
+        'TestAgent'
+      );
+
+      const [, , observations] = mockStoreObservations.mock.calls[0];
+      expect(observations[0].title).toBe(normalizeRelativeDates('Yesterday deployment issue'));
+      expect(observations[0].narrative).toBe(normalizeRelativeDates('last week we changed this flow'));
+      expect(observations[0].facts).toEqual([
+        normalizeRelativeDates('Reproduced yesterday'),
+        normalizeRelativeDates('Root cause from last week release'),
+      ]);
     });
   });
 
