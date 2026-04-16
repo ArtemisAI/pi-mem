@@ -17,16 +17,49 @@
 
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { basename } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
 const DEFAULT_WORKER_PORT = 37777;
-const parsedPort = process.env.CLAUDE_MEM_PORT ? parseInt(process.env.CLAUDE_MEM_PORT, 10) : DEFAULT_WORKER_PORT;
-const WORKER_PORT = Number.isFinite(parsedPort) ? parsedPort : DEFAULT_WORKER_PORT;
-const WORKER_HOST = process.env.CLAUDE_MEM_HOST || "127.0.0.1";
+
+function discoverWorkerHost(): string {
+  if (process.env.CLAUDE_MEM_HOST) return process.env.CLAUDE_MEM_HOST;
+  const settingsDir = process.env.CLAUDE_MEM_DATA_DIR || join(homedir(), ".claude-mem");
+  const settingsPath = join(settingsDir, "settings.json");
+  if (existsSync(settingsPath)) {
+    try {
+      const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+      if (typeof settings.CLAUDE_MEM_WORKER_HOST === "string") return settings.CLAUDE_MEM_WORKER_HOST;
+    } catch { /* ignore parse/read errors */ }
+  }
+  return "127.0.0.1";
+}
+
+function discoverWorkerPort(): number {
+  if (process.env.CLAUDE_MEM_PORT) {
+    const parsed = parseInt(process.env.CLAUDE_MEM_PORT, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const settingsDir = process.env.CLAUDE_MEM_DATA_DIR || join(homedir(), ".claude-mem");
+  const settingsPath = join(settingsDir, "settings.json");
+  if (existsSync(settingsPath)) {
+    try {
+      const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+      if (typeof settings.CLAUDE_MEM_WORKER_PORT === "number" && Number.isFinite(settings.CLAUDE_MEM_WORKER_PORT)) {
+        return settings.CLAUDE_MEM_WORKER_PORT;
+      }
+    } catch { /* ignore parse/read errors */ }
+  }
+  return DEFAULT_WORKER_PORT;
+}
+
+const WORKER_PORT = discoverWorkerPort();
+const WORKER_HOST = discoverWorkerHost();
 const PLATFORM_SOURCE = "pi-agent";
 const MAX_TOOL_RESPONSE_LENGTH = 1000;
 const SESSION_COMPLETE_DELAY_MS = 3000;
