@@ -164,6 +164,7 @@ export class ClaudeMemDatabase {
     this.db.run('PRAGMA synchronous = NORMAL');
     this.db.run('PRAGMA foreign_keys = ON');
     this.db.run('PRAGMA temp_store = memory');
+    this.db.run('PRAGMA busy_timeout = 5000');
     this.db.run(`PRAGMA mmap_size = ${SQLITE_MMAP_SIZE_BYTES}`);
     this.db.run(`PRAGMA cache_size = ${SQLITE_CACHE_SIZE_PAGES}`);
 
@@ -227,6 +228,7 @@ export class DatabaseManager {
     this.db.run('PRAGMA synchronous = NORMAL');
     this.db.run('PRAGMA foreign_keys = ON');
     this.db.run('PRAGMA temp_store = memory');
+    this.db.run('PRAGMA busy_timeout = 5000');
     this.db.run(`PRAGMA mmap_size = ${SQLITE_MMAP_SIZE_BYTES}`);
     this.db.run(`PRAGMA cache_size = ${SQLITE_CACHE_SIZE_PAGES}`);
 
