@@ -92,8 +92,8 @@ curl -s "http://100.89.23.33:37777/api/search?query=test&limit=5"
 |---|---|
 | Host | brain (100.89.23.33 via Tailscale) |
 | Port | 37777 |
-| Provider | openrouter → OpenRouter API (nvidia/nemotron-3-super-120b) |
-| Model | nvidia/nemotron-3-super-120b-a12b:free |
+| Provider | openrouter → api.ai-automate.me proxy → gemma4:31b |
+| Model | gemma4:31b (62 models available via proxy rotation) |
 | Data | /opt/claude-mem-data/ on brain |
 | Service | systemd `claude-mem-worker` |
 
