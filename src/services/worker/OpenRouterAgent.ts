@@ -86,7 +86,10 @@ export class OpenRouterAgent {
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
     try {
       // Get OpenRouter configuration
-      const { apiKey, baseUrl, model, siteUrl, appName, temperature, maxOutputTokens } = this.getOpenRouterConfig();
+      const config = this.getOpenRouterConfig();
+      // Tier routing: use session model override if set (e.g., simpler model for basic observations)
+      const model = session.modelOverride || config.model;
+      const { apiKey, baseUrl, siteUrl, appName, temperature, maxOutputTokens } = config;
 
       if (!apiKey) {
         throw new Error('OpenRouter API key not configured. Set CLAUDE_MEM_OPENROUTER_API_KEY in settings or OPENROUTER_API_KEY environment variable.');
