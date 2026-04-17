@@ -376,21 +376,56 @@ export class OpenRouterAgent {
       estimatedTokens
     });
 
-    const response = await fetch(baseUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'HTTP-Referer': siteUrl || 'https://github.com/thedotmack/claude-mem',
-        'X-Title': appName || 'claude-mem',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: temperature ?? 0.3,
-        max_tokens: maxOutputTokens ?? 4096,
-      }),
+    const body = JSON.stringify({
+      model,
+      messages,
+      temperature: temperature ?? 0.3,
+      max_tokens: maxOutputTokens ?? 4096,
     });
+
+    const MAX_RETRIES = 3;
+    let response: Response;
+
+    for (let attempt = 0; ; attempt++) {
+      response = await fetch(baseUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': siteUrl || 'https://github.com/thedotmack/claude-mem',
+          'X-Title': appName || 'claude-mem',
+          'Content-Type': 'application/json',
+        },
+        body,
+      });
+
+      if (response.ok || attempt >= MAX_RETRIES) break;
+
+      // Retry on 429 (rate limit) and 5xx (provider errors)
+      if (response.status === 429 || response.status >= 500) {
+        const errorText = await response.text().catch(() => '');
+        let delaySec = 5 * Math.pow(2, attempt); // 5s, 10s, 20s
+
+        // Parse rate-limit reset header if available
+        try {
+          const errData = JSON.parse(errorText);
+          const resetMs = errData?.metadata?.headers?.['X-RateLimit-Reset'];
+          if (resetMs) {
+            const resetDelay = (parseInt(resetMs) - Date.now()) / 1000;
+            if (resetDelay > 0 && resetDelay < 120) delaySec = Math.ceil(resetDelay) + 1;
+          }
+        } catch { /* use default backoff */ }
+
+        logger.warn('SDK', `OpenRouter ${response.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delaySec}s`, {
+          model, status: response.status, attempt
+        });
+
+        await new Promise(r => setTimeout(r, delaySec * 1000));
+        continue;
+      }
+
+      // Non-retryable error
+      break;
+    }
 
     if (!response.ok) {
       const errorText = await response.text();

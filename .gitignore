@@ -14,6 +14,7 @@ dist/
 .claude/skills/
 .claude/plans/
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 plugin/data/
 plugin/data.backup/
 package-lock.json
@@ -38,3 +39,8 @@ src/ui/viewer.html
 
 # Local contribution analysis (not part of upstream)
 CONTRIB_NOTES.md
+TASK.md
+CHECKPOINT.md
+.pi-lens/
+plugin/scripts/*.broken
+plugin/bun.lockb
