@@ -9,7 +9,6 @@
  */
 
 import path from 'path';
-import { homedir } from 'os';
 import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync, rmSync, statSync, utimesSync } from 'fs';
 import { exec, execSync, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -17,11 +16,14 @@ import { logger } from '../../utils/logger.js';
 import { HOOK_TIMEOUTS } from '../../shared/hook-constants.js';
 import { sanitizeEnv } from '../../supervisor/env-sanitizer.js';
 import { getSupervisor, validateWorkerPidFile, type ValidateWorkerPidStatus } from '../../supervisor/index.js';
+import { DATA_DIR } from '../../shared/paths.js';
 
 const execAsync = promisify(exec);
 
-// Standard paths for PID file management
-const DATA_DIR = path.join(homedir(), '.claude-mem');
+// Standard paths for PID file management.
+// DATA_DIR is sourced from shared/paths.ts so CLAUDE_MEM_DATA_DIR honors
+// per-worker isolation (e.g. running a fork-mode worker alongside the
+// stable upstream worker on a different data dir).
 const PID_FILE = path.join(DATA_DIR, 'worker.pid');
 
 // Orphaned process cleanup patterns and thresholds

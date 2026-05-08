@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, rmSync } from 'fs';
-import { homedir } from 'os';
 import path from 'path';
 import { logger } from '../utils/logger.js';
 import { getProcessRegistry, isPidAlive, type ManagedProcessInfo, type ProcessRegistry } from './process-registry.js';
 import { runShutdownCascade } from './shutdown.js';
 import { startHealthChecker, stopHealthChecker } from './health-checker.js';
+import { DATA_DIR } from '../shared/paths.js';
 
-const DATA_DIR = path.join(homedir(), '.claude-mem');
+// DATA_DIR comes from shared/paths.ts so CLAUDE_MEM_DATA_DIR isolates pid/registry.
 const PID_FILE = path.join(DATA_DIR, 'worker.pid');
 
 interface PidInfo {

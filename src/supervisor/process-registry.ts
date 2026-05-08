@@ -1,13 +1,13 @@
 import { ChildProcess } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
 import path from 'path';
 import { logger } from '../utils/logger.js';
+import { DATA_DIR } from '../shared/paths.js';
 
 const REAP_SESSION_SIGTERM_TIMEOUT_MS = 5_000;
 const REAP_SESSION_SIGKILL_TIMEOUT_MS = 1_000;
 
-const DATA_DIR = path.join(homedir(), '.claude-mem');
+// DATA_DIR comes from shared/paths.ts so CLAUDE_MEM_DATA_DIR isolates the registry.
 const DEFAULT_REGISTRY_PATH = path.join(DATA_DIR, 'supervisor.json');
 
 export interface ManagedProcessInfo {
