@@ -43,7 +43,36 @@ export class SearchRoutes extends BaseRouteHandler {
     // Timeline and help endpoints
     app.get('/api/timeline/by-query', this.handleGetTimelineByQuery.bind(this));
     app.get('/api/search/help', this.handleSearchHelp.bind(this));
+
+    // OM provenance lookup (U3): supports U5 global_recall by mapping a
+    // 12-char hex om_id back to its stored observation row, including
+    // session_file and source_entry_ids needed for cross-session exact recall.
+    app.get('/api/search/by-om-id/:omId', this.handleSearchByOMId.bind(this));
   }
+
+  /**
+   * GET /api/search/by-om-id/:omId[?project=...]
+   *
+   * Returns the OM-derived observation row stored by the bridge ingestion
+   * route, including provenance metadata. Returns 404 when no row matches
+   * the given om_id (with optional project scope).
+   */
+  private handleSearchByOMId = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {
+    const omId = typeof req.params.omId === 'string' ? req.params.omId : '';
+    if (!/^[a-f0-9]{4,64}$/.test(omId)) {
+      res.status(400).json({ error: 'invalid om_id' });
+      return;
+    }
+    const project = typeof req.query.project === 'string' && req.query.project.length > 0
+      ? req.query.project
+      : undefined;
+    const row = this.searchManager.findObservationByOMId(omId, project);
+    if (!row) {
+      res.status(404).json({ error: 'not_found', om_id: omId });
+      return;
+    }
+    res.json(row);
+  });
 
   /**
    * Unified search (observations + sessions + prompts)

@@ -37,6 +37,7 @@ export class MigrationRunner {
     this.addSessionCustomTitleColumn();
     this.createObservationFeedbackTable();
     this.addSessionPlatformSourceColumn();
+    this.addObservationOMProvenanceColumns();
   }
 
   /**
@@ -921,5 +922,74 @@ export class MigrationRunner {
     }
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(25, new Date().toISOString());
+  }
+
+  /**
+   * Add OM (pi-observational-memory) provenance columns to observations
+   * (migration 26).
+   *
+   * Lets the worker store already-compressed OM observations and
+   * reflections as first-class rows alongside raw-tool-derived
+   * observations. Each new column is nullable except `source`, which
+   * defaults to 'pi-mem' so existing rows continue to round-trip.
+   *
+   *   - source              TEXT NOT NULL DEFAULT 'pi-mem' — origin system
+   *                          ('pi-mem' for raw tool capture,
+   *                          'pi-observational-memory' for OM exports).
+   *   - om_id               TEXT — OM record id (12-char hex) when known.
+   *   - om_kind             TEXT — 'observation' | 'reflection'.
+   *   - om_relevance        TEXT — 'low' | 'medium' | 'high' | 'critical'.
+   *   - om_timestamp        TEXT — OM-supplied 'YYYY-MM-DD HH:MM' timestamp.
+   *   - om_session_file     TEXT — absolute path to the source session
+   *                          JSONL when available; null for ephemeral.
+   *   - om_source_entry_ids TEXT — JSON array of source entry ids the OM
+   *                          observation was distilled from.
+   *
+   * Index `idx_observations_om_id` supports the planned global_recall
+   * lookup path (U5).
+   */
+  private addObservationOMProvenanceColumns(): void {
+    const applied = this.db
+      .prepare('SELECT version FROM schema_versions WHERE version = ?')
+      .get(26) as SchemaVersion | undefined;
+
+    const tableInfo = this.db.query('PRAGMA table_info(observations)').all() as TableColumnInfo[];
+    const has = (name: string): boolean => tableInfo.some(col => col.name === name);
+
+    if (applied && has('source') && has('om_id') && has('om_kind') && has('om_relevance')
+      && has('om_timestamp') && has('om_session_file') && has('om_source_entry_ids')) {
+      return;
+    }
+
+    if (!has('source')) {
+      this.db.run("ALTER TABLE observations ADD COLUMN source TEXT NOT NULL DEFAULT 'pi-mem'");
+      logger.debug('DB', 'Added observations.source column (default pi-mem)');
+    }
+    if (!has('om_id')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_id TEXT');
+    }
+    if (!has('om_kind')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_kind TEXT');
+    }
+    if (!has('om_relevance')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_relevance TEXT');
+    }
+    if (!has('om_timestamp')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_timestamp TEXT');
+    }
+    if (!has('om_session_file')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_session_file TEXT');
+    }
+    if (!has('om_source_entry_ids')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_source_entry_ids TEXT');
+    }
+
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_observations_om_id ON observations(om_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_observations_source_project ON observations(source, project)');
+
+    this.db
+      .prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)')
+      .run(26, new Date().toISOString());
+    logger.debug('DB', 'Added OM provenance columns + indexes to observations table (migration 26)');
   }
 }

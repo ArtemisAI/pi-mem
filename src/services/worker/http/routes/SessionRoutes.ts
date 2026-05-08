@@ -24,6 +24,8 @@ import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
 import { getProcessBySession, ensureProcessExit } from '../../ProcessRegistry.js';
 import { getProjectName } from '../../../../utils/project-name.js';
 import { normalizePlatformSource } from '../../../../shared/platform-source.js';
+import { storeOMObservation } from '../../../sqlite/Observations.js';
+import type { OMObservationInput } from '../../../sqlite/observations/types.js';
 
 export class SessionRoutes extends BaseRouteHandler {
   private completionHandler: SessionCompletionHandler;
@@ -329,7 +331,91 @@ export class SessionRoutes extends BaseRouteHandler {
     app.post('/api/sessions/summarize', this.handleSummarizeByClaudeId.bind(this));
     app.post('/api/sessions/complete', this.handleCompleteByClaudeId.bind(this));
     app.get('/api/sessions/status', this.handleStatusByClaudeId.bind(this));
+
+    // OM-bridge ingestion: stores already-compressed pi-observational-memory
+    // observations and reflections directly, bypassing the LLM observation
+    // generator. See docs/plans/2026-05-08-001 (U3).
+    app.post('/api/sessions/om-observations', this.handleOMObservation.bind(this));
   }
+
+  /**
+   * Ingest an already-compressed observational-memory record.
+   *
+   * Accepts the wire format produced by `om-to-mem-bridge` (U2):
+   *
+   *   {
+   *     project: string,
+   *     kind: 'observation' | 'reflection',
+   *     content: string,
+   *     om_id?: string,
+   *     relevance?: 'low'|'medium'|'high'|'critical',
+   *     om_timestamp?: string,
+   *     source_entry_ids?: string[],
+   *     session_file?: string | null
+   *   }
+   *
+   * Persists directly into observations with provenance metadata. Idempotent
+   * on (kind, om_id) when an id is present, content-keyed otherwise.
+   * Returns 200 with `{ status: 'stored' | 'deduped', id }` on success.
+   *
+   * Fails open: validation errors return 400 with a clear reason rather
+   * than crashing the bridge caller.
+   */
+  private handleOMObservation = this.wrapHandler((req: Request, res: Response): void => {
+    const body = req.body as Partial<OMObservationInput> & { source_entry_ids?: unknown };
+
+    if (!body || typeof body !== 'object') {
+      return this.badRequest(res, 'Missing request body');
+    }
+    if (typeof body.project !== 'string' || body.project.trim().length === 0) {
+      return this.badRequest(res, 'Missing project');
+    }
+    if (body.kind !== 'observation' && body.kind !== 'reflection') {
+      return this.badRequest(res, "kind must be 'observation' or 'reflection'");
+    }
+    if (typeof body.content !== 'string' || body.content.trim().length === 0) {
+      return this.badRequest(res, 'Missing content');
+    }
+
+    let omSourceEntryIds: string[] | null = null;
+    const rawIds = (body as { source_entry_ids?: unknown; om_source_entry_ids?: unknown });
+    const idsCandidate = rawIds.om_source_entry_ids ?? rawIds.source_entry_ids;
+    if (Array.isArray(idsCandidate)) {
+      omSourceEntryIds = idsCandidate.filter((v): v is string => typeof v === 'string');
+    }
+
+    try {
+      const store = this.dbManager.getSessionStore();
+      const result = storeOMObservation(store.db, {
+        project: body.project,
+        kind: body.kind,
+        content: body.content,
+        om_id: typeof body.om_id === 'string' ? body.om_id : null,
+        om_relevance:
+          body.om_relevance === 'low' || body.om_relevance === 'medium'
+            || body.om_relevance === 'high' || body.om_relevance === 'critical'
+            ? body.om_relevance
+            : null,
+        om_timestamp: typeof body.om_timestamp === 'string' ? body.om_timestamp : null,
+        session_file: typeof body.session_file === 'string' ? body.session_file : null,
+        om_source_entry_ids: omSourceEntryIds,
+      });
+
+      logger.debug('SESSION', 'OM observation ingested', {
+        id: result.id,
+        deduped: result.deduped,
+        project: body.project,
+        kind: body.kind,
+        om_id: body.om_id,
+      });
+
+      res.json({ status: result.deduped ? 'deduped' : 'stored', id: result.id });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error('SESSION', 'OM observation ingest failed', { message });
+      res.status(500).json({ error: message });
+    }
+  });
 
   /**
    * Initialize a new session

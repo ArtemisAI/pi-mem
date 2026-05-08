@@ -17,6 +17,8 @@ import { basename } from 'path';
 import { SessionSearch } from '../sqlite/SessionSearch.js';
 import { SessionStore } from '../sqlite/SessionStore.js';
 import { ChromaSync } from '../sync/ChromaSync.js';
+import { getObservationByOMId } from '../sqlite/Observations.js';
+import type { OMProvenanceObservation } from '../sqlite/observations/types.js';
 import { FormattingService } from './FormattingService.js';
 import { TimelineService } from './TimelineService.js';
 import type { TimelineItem } from './TimelineService.js';
@@ -35,6 +37,14 @@ import type { TimelineData } from './search/index.js';
 export class SearchManager {
   private orchestrator: SearchOrchestrator;
   private timelineBuilder: TimelineBuilder;
+
+  /**
+   * Look up an OM-derived observation by its 12-char hex om_id (U3/U5).
+   * Optionally scope to a single project.
+   */
+  findObservationByOMId(omId: string, project?: string): OMProvenanceObservation | null {
+    return getObservationByOMId(this.sessionStore.db, omId, project);
+  }
 
   constructor(
     private sessionSearch: SessionSearch,
