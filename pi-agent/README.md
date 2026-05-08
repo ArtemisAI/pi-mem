@@ -138,15 +138,37 @@ lower-noise preset is:
   "pi-mem": {
     "captureToolResults": false,
     "contextInjection": "session-start"
+  },
+  "om-to-mem-bridge": {
+    "enabled": true
   }
 }
 ```
 
 This lets pi-observational-memory own structured within-session memory while
 pi-mem keeps cross-session search and a single context injection per session.
-A companion bridge extension is expected to forward high-signal compacted OM
-observations into the pi-mem worker so cross-session continuity does not
-regress.
+The `om-to-mem-bridge` companion extension forwards finalized OM compaction
+output (high/critical observations + all reflections) into the pi-mem worker
+so cross-session continuity does not regress when raw tool capture is off.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `memory_recall` | Semantic search over past sessions. Use to discover relevant prior work. Returns formatted timeline matches plus identifiers (`om_id`) for follow-up. |
+| `global_recall` | Provenance-aware cross-session recall (U5). Maps a known 12-char hex `om_id` back to its stored long-term observation, and — when the source session JSONL is still available — recovers exact source evidence via `pi-observational-memory`'s bridge surface. Distinct from OM's session-local `recall`, which only resolves ids on the current branch. |
+
+## Worker ingestion routes
+
+| Route | Body / params | Purpose |
+|---|---|---|
+| `POST /api/sessions/observations` | `{ contentSessionId, tool_name, tool_input, tool_response, cwd, platformSource }` | Raw tool capture (legacy path; gated by `captureToolResults`). |
+| `POST /api/sessions/om-observations` | `{ project, kind: 'observation' \| 'reflection', content, om_id?, om_relevance?, om_timestamp?, source_entry_ids?, session_file? }` | Direct OM-record ingestion (U3). Bypasses the LLM observation generator; provenance fields persisted in dedicated columns; idempotent on `(kind, om_id)`. |
+| `GET /api/search/by-om-id/:omId[?project=...]` | path + optional query | OM-id lookup used by `global_recall` (U3/U5). Returns 404 when no row matches. |
+
+Both ingestion routes fail open: validation errors return 400 with a
+clear reason, the worker never fabricates evidence, and the bridge
+caller is expected to swallow non-2xx responses.
 
 ## Cross-Engine Memory
 
