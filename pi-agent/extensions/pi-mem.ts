@@ -21,6 +21,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { loadConfig, type PiMemConfig } from "./config.js";
+import {
+	formatGlobalRecallText,
+	runGlobalRecall,
+	type OMBridgeRecaller,
+} from "./global-recall.js";
 
 // =============================================================================
 // Configuration
@@ -124,6 +129,30 @@ function workerPostFireAndForget(path: string, body: Record<string, unknown>): v
 	});
 }
 
+async function workerGetJson<T = Record<string, unknown>>(path: string): Promise<{ status: number; body: T | null }> {
+	const { controller, clear } = createTimeoutController();
+	try {
+		const response = await fetch(workerUrl(path), { signal: controller.signal });
+		let body: T | null = null;
+		try {
+			body = (await response.json()) as T;
+		} catch {
+			body = null;
+		}
+		return { status: response.status, body };
+	} catch (error: unknown) {
+		if (error instanceof DOMException && error.name === "AbortError") {
+			console.error(`[pi-mem] Worker GET ${path} timed out after ${WORKER_FETCH_TIMEOUT_MS}ms`);
+			return { status: 0, body: null };
+		}
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`[pi-mem] Worker GET ${path} failed: ${message}`);
+		return { status: 0, body: null };
+	} finally {
+		clear();
+	}
+}
+
 async function workerGetText(path: string): Promise<string | null> {
 	const { controller, clear } = createTimeoutController();
 	try {
@@ -144,6 +173,42 @@ async function workerGetText(path: string): Promise<string | null> {
 	} finally {
 		clear();
 	}
+}
+
+// =============================================================================
+// OM bridge recall loader (U5)
+//
+// Loads pi-observational-memory's recallSourcesFromSessionFile lazily so
+// installations without OM still load this extension cleanly. Returns null
+// when neither the U4 bridge surface nor a backwards-compatible fallback
+// resolves — callers degrade to provenance-only recall in that case.
+// =============================================================================
+
+async function loadBridgeRecall(): Promise<OMBridgeRecaller | null> {
+	try {
+		const mod = (await import("pi-observational-memory/src/bridge.js")) as {
+			recallSourcesFromSessionFile?: (
+				sessionFile: string,
+				omId: string,
+			) => {
+				recall: unknown;
+				unavailableReason?: "missing-session-file" | "unreadable-session-file" | "empty-session-file";
+			};
+		};
+		if (typeof mod.recallSourcesFromSessionFile === "function") {
+			const fn = mod.recallSourcesFromSessionFile;
+			return async (sessionFile, omId) => {
+				const out = fn(sessionFile, omId);
+				return {
+					recall: (out.recall as Record<string, unknown> | null) ?? null,
+					unavailableReason: out.unavailableReason,
+				};
+			};
+		}
+	} catch {
+		/* fall through */
+	}
+	return null;
 }
 
 // =============================================================================
@@ -441,6 +506,47 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// Quick health check — verifies the worker is reachable and shows
 	// current session state.
 	// =========================================================================
+
+	// =========================================================================
+	// Tool: global_recall
+	//
+	// Provenance-aware cross-session recall (U5). Maps a known OM 12-char hex
+	// id back to its stored long-term observation in the pi-mem worker, and
+	// when the original session file is still available, recovers exact
+	// source evidence via OM's bridge surface (recallSourcesFromSessionFile).
+	//
+	// Distinct from `memory_recall` (semantic search) and OM's session-local
+	// `recall` tool. Use `memory_recall` to discover ids; use this tool to
+	// retrieve provenance and exact evidence for a known id.
+	// =========================================================================
+
+	pi.registerTool({
+		name: "global_recall",
+		label: "Global Recall",
+		description:
+			"Recover the long-term pi-mem record for a known observational-memory id (12-char hex). Returns the stored observation/reflection plus exact source evidence when the original session file is available. Use after `memory_recall` surfaces an om_id that needs deeper context.",
+		parameters: Type.Object({
+			om_id: Type.String({ description: "12-character hex OM id (e.g. '0123456789ab')" }),
+			project: Type.Optional(Type.String({ description: "Optional project scope; defaults to all projects" })),
+		}),
+
+		async execute(_toolCallId, params) {
+			const result = await runGlobalRecall(
+				{
+					om_id: String(params.om_id ?? ""),
+					project: typeof params.project === "string" ? params.project : undefined,
+				},
+				{
+					fetchWorker: async (path) => workerGetJson(path),
+					loadOmBridgeRecall: loadBridgeRecall,
+				},
+			);
+			return {
+				content: [{ type: "text" as const, text: formatGlobalRecallText(result) }],
+				details: result,
+			};
+		},
+	});
 
 	pi.registerCommand("memory-status", {
 		description: "Show pi-mem connection status and current session info",
