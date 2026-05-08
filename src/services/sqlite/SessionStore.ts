@@ -66,6 +66,7 @@ export class SessionStore {
     this.addSessionCustomTitleColumn();
     this.addSessionPlatformSourceColumn();
     this.addObservationModelColumns();
+    this.addObservationOMProvenanceColumns();
   }
 
   /**
@@ -943,6 +944,66 @@ export class SessionStore {
     }
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(26, new Date().toISOString());
+  }
+
+  /**
+   * Add OM (pi-observational-memory) provenance columns to observations.
+   *
+   * Mirrors MigrationRunner.addObservationOMProvenanceColumns() so the
+   * SessionStore constructor migration path (legacy) and the
+   * MigrationRunner path (newer ClaudeMemDatabase) both apply the same
+   * provenance schema. Fired after addObservationModelColumns()
+   * (upstream's migration 26) — both record version 26, but the
+   * column-existence check makes both methods idempotent.
+   *
+   *   - source              TEXT NOT NULL DEFAULT 'pi-mem'
+   *   - om_id               TEXT — OM record id (12-char hex) when known.
+   *   - om_kind             TEXT — 'observation' | 'reflection'.
+   *   - om_relevance        TEXT — 'low' | 'medium' | 'high' | 'critical'.
+   *   - om_timestamp        TEXT — OM-supplied 'YYYY-MM-DD HH:MM' timestamp.
+   *   - om_session_file     TEXT — absolute path to the source session
+   *                          JSONL when available; null for ephemeral.
+   *   - om_source_entry_ids TEXT — JSON array of source entry ids the OM
+   *                          observation was distilled from.
+   *
+   * Index `idx_observations_om_id` supports the global_recall lookup
+   * path (U5).
+   */
+  private addObservationOMProvenanceColumns(): void {
+    const tableInfo = this.db.query('PRAGMA table_info(observations)').all() as TableColumnInfo[];
+    const has = (name: string): boolean => tableInfo.some(col => col.name === name);
+
+    if (
+      has('source') && has('om_id') && has('om_kind') && has('om_relevance')
+      && has('om_timestamp') && has('om_session_file') && has('om_source_entry_ids')
+    ) {
+      return;
+    }
+
+    if (!has('source')) {
+      this.db.run("ALTER TABLE observations ADD COLUMN source TEXT NOT NULL DEFAULT 'pi-mem'");
+    }
+    if (!has('om_id')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_id TEXT');
+    }
+    if (!has('om_kind')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_kind TEXT');
+    }
+    if (!has('om_relevance')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_relevance TEXT');
+    }
+    if (!has('om_timestamp')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_timestamp TEXT');
+    }
+    if (!has('om_session_file')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_session_file TEXT');
+    }
+    if (!has('om_source_entry_ids')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN om_source_entry_ids TEXT');
+    }
+
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_observations_om_id ON observations(om_id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_observations_source_project ON observations(source, project)');
   }
 
   /**
