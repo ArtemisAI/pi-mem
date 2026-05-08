@@ -20,6 +20,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { loadConfig, type PiMemConfig } from "./config.js";
 
 // =============================================================================
 // Configuration
@@ -169,6 +170,13 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	let contentSessionId: string | null = null;
 	let projectName = "pi-agent";
 	let sessionCwd = process.cwd();
+	// Loaded once per session_start so project-local settings.json takes effect
+	// without requiring a Pi reload between projects.
+	let cfg: PiMemConfig = loadConfig();
+	// Tracks whether the cross-session pi-mem context has been injected this
+	// session (or this post-compaction window). Used by the "session-start"
+	// contextInjection mode to inject exactly once per logical session.
+	let contextInjected = false;
 
 	// Check kill switch
 	if (process.env.PI_MEM_DISABLED === "1") {
@@ -187,6 +195,11 @@ export default function piMemExtension(pi: ExtensionAPI) {
 		sessionCwd = ctx.cwd;
 		projectName = deriveProjectName(sessionCwd);
 		contentSessionId = `pi-${projectName}-${Date.now()}`;
+		// Re-load config now that we know the project cwd, so project-local
+		// .pi/settings.json can override the globally cached values picked up at
+		// extension load.
+		cfg = loadConfig({ cwd: sessionCwd });
+		contextInjected = false;
 
 		// Persist session ID into the session file for compaction recovery
 		pi.appendEntry("pi-mem-session", { contentSessionId, projectName });
@@ -233,10 +246,19 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	pi.on("context", async (event) => {
 		if (!contentSessionId) return;
 
+		// contextInjection cadence:
+		//   - "disabled":      never inject
+		//   - "session-start": inject exactly once per session (and once per
+		//                      post-compaction window, see session_compact below)
+		//   - "every-turn":    inject on every context event (default; legacy)
+		if (cfg.contextInjection === "disabled") return;
+		if (cfg.contextInjection === "session-start" && contextInjected) return;
+
 		const projects = encodeURIComponent(projectName);
 		const contextText = await workerGetText(`/api/context/inject?projects=${projects}`);
 
 		if (!contextText || contextText.trim().length === 0) return;
+		contextInjected = true;
 
 		// Inject as a user message with XML tags to delineate memory context
 		return {
@@ -266,6 +288,7 @@ export default function piMemExtension(pi: ExtensionAPI) {
 
 	pi.on("tool_result", (event) => {
 		if (!contentSessionId) return;
+		if (!cfg.captureToolResults) return;
 
 		const toolName = event.toolName;
 		if (!toolName) return;
@@ -359,8 +382,14 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.on("session_compact", () => {
-		// Nothing to do — contentSessionId persists in extension state.
-		// Re-injection happens automatically via the next `context` event.
+		// contentSessionId persists in extension state — do NOT re-init the
+		// worker session. After compaction the LLM context window has been
+		// trimmed, so for cadence "session-start" we re-arm the one-shot
+		// injection so the next context event re-supplies cross-session memory
+		// once. "every-turn" and "disabled" cadences are unaffected.
+		if (cfg.contextInjection === "session-start") {
+			contextInjected = false;
+		}
 	});
 
 	// =========================================================================

@@ -109,12 +109,44 @@ Derived from the OpenClaw plugin (`claude-mem/openclaw/src/index.ts`), which is 
 
 ## Configuration
 
+### Environment variables
+
 | Variable | Default | Description |
 |---|---|---|
 | `CLAUDE_MEM_PORT` | `37777` | Worker service port |
 | `CLAUDE_MEM_HOST` | `127.0.0.1` | Worker service host |
 | `PI_MEM_PROJECT` | (derived from cwd) | Project name for scoping observations |
 | `PI_MEM_DISABLED` | — | Set to `1` to disable the extension |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Override Pi's global config dir (used for settings discovery) |
+
+### `settings.json` keys (under `"pi-mem"`)
+
+Loaded from Pi's standard settings files in this precedence order: project (`<cwd>/.pi/settings.json`) wins over global (`<agent dir>/settings.json`), and any unset key falls back to the default.
+
+| Key | Default | Description |
+|---|---|---|
+| `captureToolResults` | `true` | When `false`, the `tool_result` handler does not POST to `/api/sessions/observations`. Use this to silence raw tool capture when an external bridge (e.g. an OM-to-pi-mem bridge) supplies higher-signal observations. |
+| `contextInjection` | `"every-turn"` | Cadence for the `context` handler's worker context injection. `"every-turn"` keeps the legacy behavior. `"session-start"` injects exactly once per session and once per post-compaction window. `"disabled"` never injects context (search-only mode via `memory_recall`). |
+
+#### Combined mode (with `pi-observational-memory`)
+
+When running pi-mem alongside `pi-observational-memory`, the recommended
+lower-noise preset is:
+
+```json
+{
+  "pi-mem": {
+    "captureToolResults": false,
+    "contextInjection": "session-start"
+  }
+}
+```
+
+This lets pi-observational-memory own structured within-session memory while
+pi-mem keeps cross-session search and a single context injection per session.
+A companion bridge extension is expected to forward high-signal compacted OM
+observations into the pi-mem worker so cross-session continuity does not
+regress.
 
 ## Cross-Engine Memory
 
