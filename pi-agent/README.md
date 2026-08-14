@@ -33,7 +33,7 @@ Gives pi-coding-agent and any pi-mono-based runtime cross-session, cross-engine 
 
 ## Installation
 
-Requires the claude-mem worker running on `localhost:37777`. Install claude-mem first via `npx claude-mem install` or run the worker from source.
+Requires the claude-mem worker running locally. The extension discovers the worker port from `~/.claude-mem/settings.json` (`CLAUDE_MEM_WORKER_PORT`, overridable via the `CLAUDE_MEM_PORT` env var). Install claude-mem first via `npx claude-mem install` or run the worker from source.
 
 ### From npm (recommended)
 
@@ -81,14 +81,13 @@ Pi-Agent (pi-coding-agent / OpenClaw / custom)
     │   ├── context            ──→  GET  /api/context/inject
     │   ├── tool_result        ──→  POST /api/sessions/observations
     │   ├── agent_end          ──→  POST /api/sessions/summarize
-    │   │                           POST /api/sessions/complete
     │   ├── session_compact    ──→  (preserve session state)
     │   └── session_shutdown   ──→  (cleanup)
     │
     └── memory_recall tool     ──→  GET  /api/search
                                          │
                                          ▼
-                            claude-mem worker (port 37777)
+                            claude-mem worker (port from ~/.claude-mem/settings.json)
                             SQLite + FTS5 + Chroma
                             Shared across all engines
 ```
@@ -101,7 +100,7 @@ Pi-Agent (pi-coding-agent / OpenClaw / custom)
 | `before_agent_start` | `POST /api/sessions/init` | Capture user prompt for privacy filtering |
 | `context` | `GET /api/context/inject` | Inject past observations into LLM context |
 | `tool_result` | `POST /api/sessions/observations` | Record what tools did (fire-and-forget) |
-| `agent_end` | `POST /api/sessions/summarize` + `complete` | AI-compress the session |
+| `agent_end` | `POST /api/sessions/summarize` | AI-compress the session |
 | `session_compact` | — | Preserve session ID across context compaction |
 | `session_shutdown` | — | Clean up local state |
 
@@ -111,9 +110,9 @@ Derived from the OpenClaw plugin (`claude-mem/openclaw/src/index.ts`), which is 
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLAUDE_MEM_PORT` | `37777` | Worker service port |
+| `CLAUDE_MEM_PORT` | from `~/.claude-mem/settings.json` (`CLAUDE_MEM_WORKER_PORT`), fallback `37777` | Worker service port |
 | `CLAUDE_MEM_HOST` | `127.0.0.1` | Worker service host |
-| `PI_MEM_PROJECT` | (derived from cwd) | Project name for scoping observations |
+| `PI_MEM_PROJECT` | (derived from repo, see below) | Override project name for scoping observations |
 | `PI_MEM_DISABLED` | — | Set to `1` to disable the extension |
 
 ## Cross-Engine Memory

@@ -17,9 +17,9 @@
 
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 // =============================================================================
 // Configuration
@@ -41,17 +41,19 @@ function discoverWorkerHost(): string {
 }
 
 function discoverWorkerPort(): number {
-  if (process.env.CLAUDE_MEM_PORT) {
-    const parsed = parseInt(process.env.CLAUDE_MEM_PORT, 10);
-    if (Number.isFinite(parsed)) return parsed;
-  }
+  const fromEnv = parseInt(process.env.CLAUDE_MEM_PORT ?? "", 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   const settingsDir = process.env.CLAUDE_MEM_DATA_DIR || join(homedir(), ".claude-mem");
   const settingsPath = join(settingsDir, "settings.json");
   if (existsSync(settingsPath)) {
     try {
       const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-      if (typeof settings.CLAUDE_MEM_WORKER_PORT === "number" && Number.isFinite(settings.CLAUDE_MEM_WORKER_PORT)) {
-        return settings.CLAUDE_MEM_WORKER_PORT;
+      // claude-mem writes settings values as strings (e.g. "37701") — accept
+      // both string and numeric shapes so the settings lookup actually works.
+      const raw = settings.CLAUDE_MEM_WORKER_PORT;
+      if (typeof raw === "string" || typeof raw === "number") {
+        const parsed = parseInt(String(raw), 10);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
       }
     } catch { /* ignore parse/read errors */ }
   }
@@ -61,8 +63,7 @@ function discoverWorkerPort(): number {
 const WORKER_PORT = discoverWorkerPort();
 const WORKER_HOST = discoverWorkerHost();
 const PLATFORM_SOURCE = "pi-agent";
-const MAX_TOOL_RESPONSE_LENGTH = 1000;
-const SESSION_COMPLETE_DELAY_MS = 3000;
+const MAX_TOOL_RESPONSE_LENGTH = 50_000;
 const WORKER_FETCH_TIMEOUT_MS = 10_000;
 const MAX_SEARCH_LIMIT = 100;
 
@@ -149,15 +150,56 @@ async function workerGetText(path: string): Promise<string | null> {
 // Project Name Derivation
 //
 // Scopes observations by project. Uses PI_MEM_PROJECT env var if set,
-// otherwise derives from the working directory basename with a "pi-" prefix.
+// otherwise replicates the claude-mem worker's own Er(cwd)/jfe(cwd)
+// derivation: basename of `git rev-parse --show-toplevel` (walked via .git),
+// prefixed with the parent repo for git worktrees ("parent/worktree"),
+// falling back to the cwd basename, then "unknown-project" at the filesystem
+// root.
+//
+// Matching the worker's key matters for cross-engine memory: Claude Code,
+// Cursor, Codex, and OpenClaw sessions for the same repo are stored under
+// the SAME project key, so context injection and memory_recall see them.
+// A "pi-" prefix (the previous behavior) created a separate project with no
+// history and the cross-engine claim never materialized.
 // =============================================================================
 
 function deriveProjectName(cwd: string): string {
 	if (process.env.PI_MEM_PROJECT) {
 		return process.env.PI_MEM_PROJECT;
 	}
-	const dir = basename(cwd);
-	return `pi-${dir}`;
+	const start = cwd.startsWith("~") ? join(homedir(), cwd.slice(1)) : cwd;
+	let dir = start;
+	const ancestors: string[] = [];
+	for (;;) {
+		ancestors.push(dir);
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	for (const ancestor of ancestors) {
+		const gitPath = join(ancestor, ".git");
+		if (!existsSync(gitPath)) continue;
+		let parentName: string | undefined;
+		try {
+			if (statSync(gitPath).isFile()) {
+				// git worktree: .git is a file pointing at <repo>/.git/worktrees/<name>
+				const gitdir = readFileSync(gitPath, "utf8")
+					.split("\n")
+					.map((line) => line.trim())
+					.find((line) => line.startsWith("gitdir:"))
+					?.slice("gitdir:".length)
+					.trim();
+				const marker = "/.git/worktrees/";
+				const at = gitdir ? gitdir.indexOf(marker) : -1;
+				if (at > 0) parentName = basename(gitdir.slice(0, at));
+			}
+		} catch {
+			// treat as a plain repo root
+		}
+		const base = basename(ancestor) || "unknown-project";
+		return parentName ? `${parentName}/${base}` : base;
+	}
+	return basename(start) || "unknown-project";
 }
 
 // =============================================================================
@@ -236,7 +278,12 @@ export default function piMemExtension(pi: ExtensionAPI) {
 		const projects = encodeURIComponent(projectName);
 		const contextText = await workerGetText(`/api/context/inject?projects=${projects}`);
 
-		if (!contextText || contextText.trim().length === 0) return;
+		if (!contextText) return;
+		const trimmed = contextText.trim();
+		// Skip the worker's onboarding hint ("# claude-mem status — this
+		// project has no memory yet") — it is a status message, not memory,
+		// and would be injected into every prompt of a fresh project.
+		if (trimmed.length === 0 || trimmed.startsWith("# claude-mem status")) return;
 
 		// Inject as a user message with XML tags to delineate memory context
 		return {
@@ -302,9 +349,10 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 	// Event: agent_end
 	//
-	// Summarize the session and schedule completion. Uses await for summarize
-	// to ensure the worker processes it before the completion call. Completion
-	// is delayed to let in-flight fire-and-forget observations land.
+	// Summarize the session. Uses await so the worker processes the summary
+	// before the agent turn ends. (The previous `/api/sessions/complete`
+	// call was removed — the current worker has no such route, so it 404'd
+	// on every session.)
 	//
 	// Mirrors openclaw/src/index.ts lines 813-845.
 	// =========================================================================
@@ -331,21 +379,12 @@ export default function piMemExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		// Await summarize so the worker receives it before complete
+		// Await summarize so the worker receives it before the turn ends
 		await workerPost("/api/sessions/summarize", {
 			contentSessionId,
 			last_assistant_message: lastAssistantMessage,
 			platformSource: PLATFORM_SOURCE,
 		});
-
-		// Delay completion to let in-flight observations arrive
-		const sid = contentSessionId;
-		setTimeout(() => {
-			workerPostFireAndForget("/api/sessions/complete", {
-				contentSessionId: sid,
-				platformSource: PLATFORM_SOURCE,
-			});
-		}, SESSION_COMPLETE_DELAY_MS);
 	});
 
 	// =========================================================================
