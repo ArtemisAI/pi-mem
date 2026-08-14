@@ -1,4 +1,3 @@
-# Source code (dist/ and plugin/ are the shipped artifacts)
 src/
 scripts/
 tests/
@@ -7,14 +6,18 @@ datasets/
 private/
 antipattern-czar/
 
-# Heavy binaries installed at runtime via smart-install.js
+# Maintainer dev-instruction files — never ship in the npm tarball (#2537).
+# Anchored paths so plugin-functional mode templates (e.g. plugin/modes/law-study-CLAUDE.md)
+# are NOT affected.
+/CLAUDE.md
+/plugin/CLAUDE.md
+/plugin/scripts/CLAUDE.md
+
 plugin/node_modules/
 plugin/scripts/claude-mem
-plugin/bun.lock
 plugin/data/
 plugin/data.backup/
 
-# Development files
 *.ts
 !*.d.ts
 tsconfig*.json
@@ -24,7 +27,6 @@ tsconfig*.json
 jest.config*
 vitest.config*
 
-# Git and CI
 .git/
 .github/
 .gitignore
@@ -33,14 +35,12 @@ vitest.config*
 .mcp.json
 .plan/
 
-# OS files
 .DS_Store
 *.log
 *.tmp
 *.temp
 Thumbs.db
 
-# Misc
 Auto Run Docs/
 ~*/
 http*/

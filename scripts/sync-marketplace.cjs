@@ -1,10 +1,4 @@
 #!/usr/bin/env node
-/**
- * Protected sync-marketplace script
- *
- * Prevents accidental rsync overwrite when installed plugin is on beta branch.
- * If on beta, the user should use the UI to update instead.
- */
 
 const { execSync } = require('child_process');
 const { existsSync, readFileSync } = require('fs');
@@ -33,10 +27,17 @@ function getGitignoreExcludes(basePath) {
   const gitignorePath = path.join(basePath, '.gitignore');
   if (!existsSync(gitignorePath)) return '';
 
+  const syncManagedFiles = new Set();
+
   const lines = readFileSync(gitignorePath, 'utf-8').split('\n');
   return lines
     .map(line => line.trim())
-    .filter(line => line && !line.startsWith('#') && !line.startsWith('!'))
+    .filter(line =>
+      line &&
+      !line.startsWith('#') &&
+      !line.startsWith('!') &&
+      !syncManagedFiles.has(line)
+    )
     .map(pattern => `--exclude=${JSON.stringify(pattern)}`)
     .join(' ');
 }
@@ -50,14 +51,13 @@ if (branch && branch !== 'main' && !isForce) {
   console.log('\x1b[33m%s\x1b[0m', 'Running rsync would overwrite beta code.');
   console.log('');
   console.log('Options:');
-  console.log('  1. Use UI at http://localhost:37777 to update beta');
+  console.log('  1. Use the claude-mem UI on the configured worker port to update beta');
   console.log('  2. Switch to stable in UI first, then run sync');
   console.log('  3. Force rsync: npm run sync-marketplace:force');
   console.log('');
   process.exit(1);
 }
 
-// Get version from plugin.json
 function getPluginVersion() {
   try {
     const pluginJsonPath = path.join(__dirname, '..', 'plugin', '.claude-plugin', 'plugin.json');
@@ -69,14 +69,13 @@ function getPluginVersion() {
   }
 }
 
-// Normal rsync for main branch or fresh install
 console.log('Syncing to marketplace...');
 try {
   const rootDir = path.join(__dirname, '..');
   const gitignoreExcludes = getGitignoreExcludes(rootDir);
 
   execSync(
-    `rsync -av --delete --exclude=.git --exclude=bun.lock --exclude=package-lock.json ${gitignoreExcludes} ./ ~/.claude/plugins/marketplaces/thedotmack/`,
+    `rsync -av --delete --exclude=.git --exclude=bun.lock --exclude=package-lock.json --exclude=scripts/package.json --exclude=scripts/node_modules --exclude=/workers ${gitignoreExcludes} ./ ~/.claude/plugins/marketplaces/thedotmack/`,
     { stdio: 'inherit' }
   );
 
@@ -86,7 +85,6 @@ try {
     { stdio: 'inherit' }
   );
 
-  // Sync to cache folder with version
   const version = getPluginVersion();
   const CACHE_VERSION_PATH = path.join(CACHE_BASE_PATH, version);
 
@@ -99,36 +97,10 @@ try {
     { stdio: 'inherit' }
   );
 
-  // Install dependencies in cache directory so worker can resolve them
   console.log(`Running bun install in cache folder (version ${version})...`);
   execSync(`bun install`, { cwd: CACHE_VERSION_PATH, stdio: 'inherit' });
 
   console.log('\x1b[32m%s\x1b[0m', 'Sync complete!');
-
-  // Trigger worker restart after file sync
-  console.log('\n🔄 Triggering worker restart...');
-  const http = require('http');
-  const req = http.request({
-    hostname: '127.0.0.1',
-    port: 37777,
-    path: '/api/admin/restart',
-    method: 'POST',
-    timeout: 2000
-  }, (res) => {
-    if (res.statusCode === 200) {
-      console.log('\x1b[32m%s\x1b[0m', '✓ Worker restart triggered');
-    } else {
-      console.log('\x1b[33m%s\x1b[0m', `ℹ Worker restart returned status ${res.statusCode}`);
-    }
-  });
-  req.on('error', () => {
-    console.log('\x1b[33m%s\x1b[0m', 'ℹ Worker not running, will start on next hook');
-  });
-  req.on('timeout', () => {
-    req.destroy();
-    console.log('\x1b[33m%s\x1b[0m', 'ℹ Worker restart timed out');
-  });
-  req.end();
 
 } catch (error) {
   console.error('\x1b[31m%s\x1b[0m', 'Sync failed:', error.message);

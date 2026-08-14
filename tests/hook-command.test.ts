@@ -1,14 +1,50 @@
-/**
- * Tests for hook-command error classifier
- *
- * Validates that isWorkerUnavailableError correctly distinguishes between:
- * - Transport failures (ECONNREFUSED, etc.) → true (graceful degradation)
- * - Server errors (5xx) → true (graceful degradation)
- * - Client errors (4xx) → false (handler bug, blocking)
- * - Programming errors (TypeError, etc.) → false (code bug, blocking)
- */
 import { describe, it, expect } from 'bun:test';
-import { isWorkerUnavailableError } from '../src/cli/hook-command.js';
+import { buildNoOpResult, isNonBlockingHookInputError, isWorkerUnavailableError } from '../src/cli/hook-command.js';
+
+describe('buildNoOpResult', () => {
+  it('attaches a valid SessionStart hookSpecificOutput for the context event (#2972)', () => {
+    const result = buildNoOpResult('context');
+
+    expect(result).toEqual({
+      continue: true,
+      suppressOutput: true,
+      hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: '' },
+    });
+  });
+
+  it('omits hookSpecificOutput for every other event', () => {
+    for (const event of ['session-init', 'observation', 'summarize', 'user-message', 'file-edit', 'file-context']) {
+      expect(buildNoOpResult(event)).toEqual({ continue: true, suppressOutput: true });
+    }
+  });
+});
+
+describe('isNonBlockingHookInputError', () => {
+  it('classifies missing transcript paths as non-blocking hook input errors', () => {
+    const error = new Error(
+      'Transcript path missing or file does not exist: /tmp/missing-session.jsonl'
+    );
+
+    expect(isNonBlockingHookInputError(error)).toBe(true);
+  });
+
+  it('classifies missing transcript-path errors without file-existence text', () => {
+    expect(
+      isNonBlockingHookInputError(new Error('Transcript path missing: /tmp/missing-session.jsonl'))
+    ).toBe(true);
+  });
+
+  it('classifies nonexistent transcript-path errors without missing text', () => {
+    expect(
+      isNonBlockingHookInputError(new Error('Transcript path does not exist: /tmp/missing-session.jsonl'))
+    ).toBe(true);
+  });
+
+  it('does not classify unrelated hook errors as non-blocking input errors', () => {
+    expect(isNonBlockingHookInputError(new Error('Cannot read properties of undefined'))).toBe(false);
+    expect(isNonBlockingHookInputError(new Error('Request failed: 400'))).toBe(false);
+  });
+});
 
 describe('isWorkerUnavailableError', () => {
   describe('transport failures → true (graceful)', () => {
@@ -129,8 +165,6 @@ describe('isWorkerUnavailableError', () => {
   describe('programming errors → false (blocking)', () => {
     it('should NOT classify TypeError as worker unavailable', () => {
       const error = new TypeError('Cannot read properties of undefined');
-      // Note: TypeError with "fetch failed" IS classified as unavailable (transport layer)
-      // But generic TypeErrors are NOT
       expect(isWorkerUnavailableError(new TypeError('Cannot read properties of undefined'))).toBe(false);
     });
 

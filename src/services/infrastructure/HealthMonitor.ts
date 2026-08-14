@@ -1,31 +1,26 @@
-/**
- * HealthMonitor - Port monitoring, health checks, and version checking
- *
- * Extracted from worker-service.ts monolith to provide centralized health monitoring.
- * Handles:
- * - Port availability checking
- * - Worker health/readiness polling
- * - Version mismatch detection (critical for plugin updates)
- * - HTTP-based shutdown requests
- */
 
-import path from 'path';
 import net from 'net';
-import { readFileSync } from 'fs';
 import { logger } from '../../utils/logger.js';
-import { MARKETPLACE_ROOT } from '../../shared/paths.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 
-/**
- * Make an HTTP request to the worker via TCP.
- * Returns { ok, statusCode, body } or throws on transport error.
- */
+function getWorkerHost(): string {
+  return SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH).CLAUDE_MEM_WORKER_HOST;
+}
+
+// Bracket IPv6 literals so a `CLAUDE_MEM_WORKER_HOST` of `::1` yields a valid
+// `http://[::1]:port` URL instead of the malformed `http://::1:port`.
+function formatHostForUrl(host: string): string {
+  if (host.startsWith('[') && host.endsWith(']')) return host;
+  return host.includes(':') ? `[${host}]` : host;
+}
+
 async function httpRequestToWorker(
   port: number,
   endpointPath: string,
   method: string = 'GET'
 ): Promise<{ ok: boolean; statusCode: number; body: string }> {
-  const response = await fetch(`http://127.0.0.1:${port}${endpointPath}`, { method });
-  // Gracefully handle cases where response body isn't available (e.g., test mocks)
+  const response = await fetch(`http://${formatHostForUrl(getWorkerHost())}:${port}${endpointPath}`, { method });
   let body = '';
   try {
     body = await response.text();
@@ -35,32 +30,45 @@ async function httpRequestToWorker(
   return { ok: response.ok, statusCode: response.status, body };
 }
 
-/**
- * Check if a port is in use by attempting an atomic socket bind.
- * More reliable than HTTP health check for daemon spawn guards —
- * prevents TOCTOU race where two daemons both see "port free" via
- * HTTP and then both try to listen() (upstream bug workaround).
- *
- * Falls back to HTTP health check on Windows where socket bind
- * behavior differs.
- */
 export async function isPortInUse(port: number): Promise<boolean> {
   if (process.platform === 'win32') {
-    // APPROVED OVERRIDE: Windows keeps HTTP health check because socket bind
-    // semantics differ (SO_REUSEADDR defaults, firewall prompts). The TOCTOU
-    // race remains on Windows but is an accepted limitation — the atomic
-    // socket approach would cause false positives or UAC popups.
+    // Fast path: HTTP health check. A live claude-mem worker responds to
+    // /api/health, so this is the cheapest non-disruptive probe for the
+    // common case (worker is running and healthy).
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
-      return response.ok;
-    } catch {
-      return false;
+      const response = await fetch(`http://${formatHostForUrl(getWorkerHost())}:${port}/api/health`);
+      if (response.ok) return true;
+      // Non-ok response: port is reachable but the worker is unhealthy.
+      // Fall through to the net.createServer check below so we still report
+      // the port as in-use rather than falsely claiming it is free.
+      logger.debug('SYSTEM', 'Windows health check returned non-ok; falling through to socket probe', {
+        port,
+        status: response.status,
+      });
+    } catch (error) {
+      // fetch threw (ECONNREFUSED, timeout, etc.): the port may still be in
+      // use by a non-HTTP process (zombie worker, foreign service, etc.).
+      // Fall through to the net.createServer probe — only a definitive bind
+      // attempt can tell whether the port is truly free.
+      if (error instanceof Error) {
+        logger.debug('SYSTEM', 'Windows health check threw; falling through to socket probe', {
+          port,
+          message: error.message,
+        });
+      } else {
+        logger.debug('SYSTEM', 'Windows health check threw; falling through to socket probe', {
+          port,
+          error: String(error),
+        });
+      }
     }
+    // Fall through: the HTTP probe was inconclusive. Use the POSIX
+    // net.createServer() approach to definitively check port occupancy.
   }
 
-  // Unix: atomic socket bind check — no TOCTOU race
   return new Promise((resolve) => {
     const server = net.createServer();
+    const workerHost = getWorkerHost();
     server.once('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
         resolve(true);
@@ -71,14 +79,10 @@ export async function isPortInUse(port: number): Promise<boolean> {
     server.once('listening', () => {
       server.close(() => resolve(false));
     });
-    server.listen(port, '127.0.0.1');
+    server.listen(port, workerHost);
   });
 }
 
-/**
- * Poll a worker endpoint until it returns 200 OK or timeout.
- * Shared implementation for liveness and readiness checks.
- */
 async function pollEndpointUntilOk(
   port: number,
   endpointPath: string,
@@ -91,37 +95,25 @@ async function pollEndpointUntilOk(
       const result = await httpRequestToWorker(port, endpointPath);
       if (result.ok) return true;
     } catch (error) {
-      // [ANTI-PATTERN IGNORED]: Retry loop - expected failures during startup, will retry
-      logger.debug('SYSTEM', retryLogMessage, {}, error as Error);
+      if (error instanceof Error) {
+        logger.debug('SYSTEM', retryLogMessage, {}, error);
+      } else {
+        logger.debug('SYSTEM', retryLogMessage, { error: String(error) });
+      }
     }
     await new Promise(r => setTimeout(r, 500));
   }
   return false;
 }
 
-/**
- * Wait for the worker HTTP server to become responsive (liveness check).
- * Uses /api/health which returns 200 as soon as the HTTP server is listening.
- * For full initialization (DB + search), use waitForReadiness() instead.
- */
 export function waitForHealth(port: number, timeoutMs: number = 30000): Promise<boolean> {
   return pollEndpointUntilOk(port, '/api/health', timeoutMs, 'Service not ready yet, will retry');
 }
 
-/**
- * Wait for the worker to be fully initialized (DB + search ready).
- * Uses /api/readiness which returns 200 only after core initialization completes.
- * Now that initializationCompleteFlag is set after DB/search init (not MCP),
- * this typically completes in a few seconds.
- */
 export function waitForReadiness(port: number, timeoutMs: number = 30000): Promise<boolean> {
   return pollEndpointUntilOk(port, '/api/readiness', timeoutMs, 'Worker not ready yet, will retry');
 }
 
-/**
- * Wait for a port to become free (no longer responding to health checks)
- * Used after shutdown to confirm the port is available for restart
- */
 export async function waitForPortFree(port: number, timeoutMs: number = 10000): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -131,62 +123,35 @@ export async function waitForPortFree(port: number, timeoutMs: number = 10000): 
   return false;
 }
 
-/**
- * Send HTTP shutdown request to a running worker
- * @returns true if shutdown request was acknowledged, false otherwise
- */
-export async function httpShutdown(port: number): Promise<boolean> {
+export async function httpShutdown(port: number, reason: 'stop' | 'restart' = 'stop'): Promise<boolean> {
   try {
-    const result = await httpRequestToWorker(port, '/api/admin/shutdown', 'POST');
+    // The CLI restart path stops the worker through this same endpoint; the
+    // reason tag lets the worker report shutdown_reason: 'restart' on its
+    // worker_stopped telemetry instead of a generic 'stop'.
+    const endpointPath = reason === 'restart' ? '/api/admin/shutdown?reason=restart' : '/api/admin/shutdown';
+    const result = await httpRequestToWorker(port, endpointPath, 'POST');
     if (!result.ok) {
       logger.warn('SYSTEM', 'Shutdown request returned error', { status: result.statusCode });
       return false;
     }
     return true;
   } catch (error) {
-    // Connection refused is expected if worker already stopped
     if (error instanceof Error && error.message?.includes('ECONNREFUSED')) {
       logger.debug('SYSTEM', 'Worker already stopped', {}, error);
       return false;
     }
-    // Unexpected error - log full details
     logger.error('SYSTEM', 'Shutdown request failed unexpectedly', {}, error as Error);
     return false;
   }
 }
 
-/**
- * Get the plugin version from the installed marketplace package.json
- * This is the "expected" version that should be running.
- * Returns 'unknown' on ENOENT/EBUSY (shutdown race condition, fix #1042).
- */
-export function getInstalledPluginVersion(): string {
-  try {
-    const packageJsonPath = path.join(MARKETPLACE_ROOT, 'package.json');
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
-    return packageJson.version;
-  } catch (error: unknown) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'EBUSY') {
-      logger.debug('SYSTEM', 'Could not read plugin version (shutdown race)', { code });
-      return 'unknown';
-    }
-    throw error;
-  }
-}
-
-/**
- * Get the running worker's version via API
- * This is the "actual" version currently running.
- */
 export async function getRunningWorkerVersion(port: number): Promise<string | null> {
   try {
-    const result = await httpRequestToWorker(port, '/api/version');
+    const result = await httpRequestToWorker(port, '/api/health');
     if (!result.ok) return null;
     const data = JSON.parse(result.body) as { version: string };
     return data.version;
   } catch {
-    // Expected: worker not running or version endpoint unavailable
     logger.debug('SYSTEM', 'Could not fetch worker version', {});
     return null;
   }
@@ -199,15 +164,16 @@ export interface VersionCheckResult {
 }
 
 /**
- * Check if worker version matches plugin version
- * Critical for detecting when plugin is updated but worker is still running old code
- * Returns true if versions match or if we can't determine (assume match for graceful degradation)
+ * Compare the live worker's self-reported version against expectedVersion —
+ * the version of the script the caller's resolveWorkerScript() oracle would
+ * spawn. The caller supplies it so detection and respawn can never consult
+ * different oracles (the 2026-07-22 restart storm). Either side unknown →
+ * matches, since a recycle could not change the outcome deterministically.
  */
-export async function checkVersionMatch(port: number): Promise<VersionCheckResult> {
-  const pluginVersion = getInstalledPluginVersion();
+export async function checkVersionMatch(port: number, expectedVersion: string | null): Promise<VersionCheckResult> {
+  const pluginVersion = expectedVersion ?? 'unknown';
   const workerVersion = await getRunningWorkerVersion(port);
 
-  // If either version is unknown/null, assume match (graceful degradation, fix #1042)
   if (!workerVersion || pluginVersion === 'unknown') {
     return { matches: true, pluginVersion, workerVersion };
   }

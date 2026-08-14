@@ -1,24 +1,13 @@
-/**
- * ContextConfigLoader - Loads and validates context configuration
- *
- * Handles loading settings from file with mode-based filtering for observation types.
- */
 
-import path from 'path';
-import { homedir } from 'os';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { paths } from '../../shared/paths.js';
 import { ModeManager } from '../domain/ModeManager.js';
 import type { ContextConfig } from './types.js';
 
-/**
- * Load all context configuration settings
- * Priority: ~/.claude-mem/settings.json > env var > defaults
- */
 export function loadContextConfig(): ContextConfig {
-  const settingsPath = path.join(homedir(), '.claude-mem', 'settings.json');
+  const settingsPath = paths.settings();
   const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
 
-  // Always read types/concepts from the active mode definition
   const mode = ModeManager.getInstance().getActiveMode();
   const observationTypes = new Set(mode.observation_types.map(t => t.id));
   const observationConcepts = new Set(mode.observation_concepts.map(c => c.id));

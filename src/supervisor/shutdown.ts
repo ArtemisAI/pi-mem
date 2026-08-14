@@ -1,17 +1,13 @@
 import { execFile } from 'child_process';
-import { rmSync } from 'fs';
-import { homedir } from 'os';
-import path from 'path';
+import { existsSync, readFileSync, rmSync } from 'fs';
 import { promisify } from 'util';
 import { logger } from '../utils/logger.js';
 import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
-import { isPidAlive, type ManagedProcessRecord, type ProcessRegistry } from './process-registry.js';
+import { isPidAlive, waitForExit, type ManagedProcessRecord, type ProcessRegistry } from './process-registry.js';
+import { paths } from '../shared/paths.js';
 
 const execFileAsync = promisify(execFile);
-const DATA_DIR = path.join(homedir(), '.claude-mem');
-const PID_FILE = path.join(DATA_DIR, 'worker.pid');
-
-type TreeKillFn = (pid: number, signal?: string, callback?: (error?: Error | null) => void) => void;
+const PID_FILE = paths.workerPid();
 
 export interface ShutdownCascadeOptions {
   registry: ProcessRegistry;
@@ -34,12 +30,22 @@ export async function runShutdownCascade(options: ShutdownCascadeOptions): Promi
     }
 
     try {
-      await signalProcess(record.pid, 'SIGTERM');
-    } catch (error) {
-      logger.debug('SYSTEM', 'Failed to send SIGTERM to child process', {
-        pid: record.pid,
-        type: record.type
-      }, error as Error);
+      await signalProcess(record, 'SIGTERM');
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        logger.debug('SYSTEM', 'Failed to send SIGTERM to child process', {
+          pid: record.pid,
+          pgid: record.pgid,
+          type: record.type
+        }, error);
+      } else {
+        logger.warn('SYSTEM', 'Failed to send SIGTERM to child process (non-Error)', {
+          pid: record.pid,
+          pgid: record.pgid,
+          type: record.type,
+          error: String(error)
+        });
+      }
     }
   }
 
@@ -48,12 +54,22 @@ export async function runShutdownCascade(options: ShutdownCascadeOptions): Promi
   const survivors = childRecords.filter(record => isPidAlive(record.pid));
   for (const record of survivors) {
     try {
-      await signalProcess(record.pid, 'SIGKILL');
-    } catch (error) {
-      logger.debug('SYSTEM', 'Failed to force kill child process', {
-        pid: record.pid,
-        type: record.type
-      }, error as Error);
+      await signalProcess(record, 'SIGKILL');
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        logger.debug('SYSTEM', 'Failed to force kill child process', {
+          pid: record.pid,
+          pgid: record.pgid,
+          type: record.type
+        }, error);
+      } else {
+        logger.warn('SYSTEM', 'Failed to force kill child process (non-Error)', {
+          pid: record.pid,
+          pgid: record.pgid,
+          type: record.type,
+          error: String(error)
+        });
+      }
     }
   }
 
@@ -66,92 +82,127 @@ export async function runShutdownCascade(options: ShutdownCascadeOptions): Promi
     options.registry.unregister(record.id);
   }
 
-  try {
-    rmSync(pidFilePath, { force: true });
-  } catch (error) {
-    logger.debug('SYSTEM', 'Failed to remove PID file during shutdown', { pidFilePath }, error as Error);
-  }
+  removeOwnedPidFile(pidFilePath, currentPid);
 
   options.registry.pruneDeadEntries();
 }
 
-async function waitForExit(records: ManagedProcessRecord[], timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+/**
+ * Owner-guarded PID-file removal (Phase 5, worker-restart plan).
+ *
+ * The shutdown cascade is the dying worker's LAST act — during a restart the
+ * successor worker has typically already written its OWN PID file by the time
+ * this runs. Blindly rmSync'ing here clobbered that file and made
+ * `worker status` report a healthy worker as not running. Deletion therefore
+ * requires proof of ownership: the recorded pid must equal `currentPid`.
+ *
+ * With `deleteIfDead` (the CLI stop/restart cleanup policy — see
+ * removePidFileIfOwner in ProcessManager.ts) a dead or missing recorded pid is
+ * also deleted: a pid-less file can't belong to a live successor
+ * (writePidFile always records a pid), so it is treated as a dead owner.
+ * Without it, only the caller's own file is ever deleted.
+ *
+ * A missing file is a no-op. An unreadable/corrupt file cannot prove
+ * ownership, so it is left in place (the safe default): readPidFile() and
+ * validateWorkerPidFile() both treat unparseable files as ownerless, so a
+ * leftover corrupt file never blocks a successor's boot and is cleaned up by
+ * the next worker start.
+ */
+export function removeOwnedPidFile(pidFilePath: string, currentPid: number | null, deleteIfDead = false): void {
+  if (!existsSync(pidFilePath)) return;
 
-  while (Date.now() < deadline) {
-    const survivors = records.filter(record => isPidAlive(record.pid));
-    if (survivors.length === 0) {
-      return;
+  let recordedPid: number | null = null;
+  try {
+    const parsed = JSON.parse(readFileSync(pidFilePath, 'utf-8')) as { pid?: unknown };
+    recordedPid = typeof parsed.pid === 'number' ? parsed.pid : null;
+  } catch (error: unknown) {
+    logger.debug('SYSTEM', 'PID file unreadable — leaving it (cannot prove ownership)', {
+      pidFilePath,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return;
+  }
+
+  const owned = currentPid !== null && recordedPid === currentPid;
+  const dead = recordedPid === null || !isPidAlive(recordedPid);
+  if (!owned && !(deleteIfDead && dead)) {
+    logger.debug('SYSTEM', 'PID file not owned by this process — leaving it for its owner (restart successor?)', {
+      pidFilePath,
+      recordedPid,
+      currentPid
+    });
+    return;
+  }
+
+  try {
+    rmSync(pidFilePath, { force: true });
+  } catch (error: unknown) {
+    if (error instanceof Error) {
+      logger.debug('SYSTEM', 'Failed to remove PID file', { pidFilePath }, error);
+    } else {
+      logger.warn('SYSTEM', 'Failed to remove PID file (non-Error)', {
+        pidFilePath,
+        error: String(error)
+      });
     }
-    await new Promise(resolve => setTimeout(resolve, 100));
   }
 }
 
-async function signalProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+async function signalProcess(record: ManagedProcessRecord, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+  const { pid, pgid } = record;
+
+  if (process.platform !== 'win32') {
+    // Try the process group first when we have one — it reaches grandchildren
+    // re-parented to init. If the group is already gone (ESRCH) the actual
+    // root pid may still be alive (e.g. it survived its own group teardown);
+    // fall through to the per-pid signal so shutdown isn't a no-op
+    // (CodeRabbit review on PR #2282).
+    if (typeof pgid === 'number') {
+      try {
+        process.kill(-pgid, signal);
+        return;
+      } catch (error: unknown) {
+        const errno = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+        if (errno !== 'ESRCH') {
+          throw error;
+        }
+        // ESRCH on the group — fall through and try the bare pid below.
+      }
+    }
+
+    try {
+      process.kill(pid, signal);
+    } catch (error: unknown) {
+      const errno = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+      if (errno !== 'ESRCH') {
+        throw error;
+      }
+    }
+    return;
+  }
+
   if (signal === 'SIGTERM') {
     try {
       process.kill(pid, signal);
-    } catch (error) {
-      const errno = (error as NodeJS.ErrnoException).code;
-      if (errno === 'ESRCH') {
-        return;
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        const errno = (error as NodeJS.ErrnoException).code;
+        if (errno === 'ESRCH') {
+          return;
+        }
       }
       throw error;
     }
     return;
   }
 
-  if (process.platform === 'win32') {
-    const treeKill = await loadTreeKill();
-    if (treeKill) {
-      await new Promise<void>((resolve, reject) => {
-        treeKill(pid, signal, (error) => {
-          if (!error) {
-            resolve();
-            return;
-          }
-
-          const errno = (error as NodeJS.ErrnoException).code;
-          if (errno === 'ESRCH') {
-            resolve();
-            return;
-          }
-          reject(error);
-        });
-      });
-      return;
-    }
-
-    const args = ['/PID', String(pid), '/T'];
-    if (signal === 'SIGKILL') {
-      args.push('/F');
-    }
-
-    await execFileAsync('taskkill', args, {
-      timeout: HOOK_TIMEOUTS.POWERSHELL_COMMAND,
-      windowsHide: true
-    });
-    return;
+  const args = ['/PID', String(pid), '/T'];
+  if (signal === 'SIGKILL') {
+    args.push('/F');
   }
 
-  try {
-    process.kill(pid, signal);
-  } catch (error) {
-    const errno = (error as NodeJS.ErrnoException).code;
-    if (errno === 'ESRCH') {
-      return;
-    }
-    throw error;
-  }
-}
-
-async function loadTreeKill(): Promise<TreeKillFn | null> {
-  const moduleName = 'tree-kill';
-
-  try {
-    const treeKillModule = await import(moduleName);
-    return (treeKillModule.default ?? treeKillModule) as TreeKillFn;
-  } catch {
-    return null;
-  }
+  await execFileAsync('taskkill', args, {
+    timeout: HOOK_TIMEOUTS.POWERSHELL_COMMAND,
+    windowsHide: true
+  });
 }

@@ -1,33 +1,56 @@
-/**
- * Tests for parseSummary (fix for #1360)
- *
- * Validates that false-positive summary matches (no sub-tags) are rejected
- * while real summaries — even with some missing fields — are still saved.
- */
-import { describe, it, expect } from 'bun:test';
-import { parseSummary } from '../../src/sdk/parser.js';
+import { afterEach, beforeEach, describe, it, expect } from 'bun:test';
 
-describe('parseSummary', () => {
-  it('returns null when no <summary> tag present', () => {
-    expect(parseSummary('<observation><title>foo</title></observation>')).toBeNull();
+import { ModeManager } from '../../src/services/domain/ModeManager.js';
+
+import { parseAgentXml } from '../../src/sdk/parser.js';
+
+// Load the real bundled `code` mode rather than mocking ModeManager. The
+// previous `mock.module(...)` replaced ModeManager process-globally and was
+// never restored, so its partial stub (no `loadMode`) leaked into other test
+// files in the same `bun test` run — notably the SDK integration tests, whose
+// createCmemClient() calls `ModeManager.getInstance().loadMode('code')`. The
+// real `code` mode is a superset of the types these tests exercise, so the
+// assertions below are unchanged.
+ModeManager.getInstance().loadMode('code');
+
+describe('parseAgentXml — summaries', () => {
+  beforeEach(() => {
+    const modeManager = ModeManager.getInstance() as unknown as { activeMode: unknown };
+    modeManager.activeMode = {
+      observation_types: [{ id: 'bugfix' }, { id: 'discovery' }, { id: 'refactor' }],
+      observation_concepts: [],
+    };
   });
 
-  it('returns null when <summary> has no sub-tags (false positive — fix for #1360)', () => {
-    // This is the bug: observation response accidentally contains <summary>some text</summary>
-    expect(parseSummary('<observation>done <summary>some content here</summary></observation>')).toBeNull();
+  afterEach(() => {
+    const modeManager = ModeManager.getInstance() as unknown as { activeMode: unknown };
+    modeManager.activeMode = null;
   });
 
-  it('returns null for bare <summary> with only plain text, no sub-tags', () => {
-    expect(parseSummary('<summary>This session was productive.</summary>')).toBeNull();
+  it('returns invalid when response is plain text (no XML)', () => {
+    const result = parseAgentXml('Some plain text response without any XML tags');
+    expect(result.valid).toBe(false);
   });
 
-  it('returns summary when at least one sub-tag is present (respects maintainer note)', () => {
+  it('returns invalid when <summary> has no sub-tags (false positive — was #1360)', () => {
+    const result = parseAgentXml('<observation>done <summary>some content here</summary></observation>');
+    expect(result.valid).toBe(false);
+  });
+
+  it('returns invalid for bare <summary> with only plain text, no sub-tags', () => {
+    const result = parseAgentXml('<summary>This session was productive.</summary>');
+    expect(result.valid).toBe(false);
+  });
+
+  it('returns valid summary when at least one sub-tag is present', () => {
     const text = `<summary><request>Fix the bug</request></summary>`;
-    const result = parseSummary(text);
-    expect(result).not.toBeNull();
-    expect(result?.request).toBe('Fix the bug');
-    expect(result?.investigated).toBeNull();
-    expect(result?.learned).toBeNull();
+    const result = parseAgentXml(text);
+    expect(result.valid).toBe(true);
+    if (result.valid && result.summary) {
+      expect(result.summary.request).toBe('Fix the bug');
+      expect(result.summary.investigated).toBeNull();
+      expect(result.summary.learned).toBeNull();
+    }
   });
 
   it('returns full summary when all fields are present', () => {
@@ -38,16 +61,49 @@ describe('parseSummary', () => {
       <completed>Extended token TTL to 24h</completed>
       <next_steps>Monitor error rates</next_steps>
     </summary>`;
-    const result = parseSummary(text);
-    expect(result).not.toBeNull();
-    expect(result?.request).toBe('Fix login bug');
-    expect(result?.investigated).toBe('Auth flow and JWT expiry');
-    expect(result?.learned).toBe('Token was expiring too soon');
-    expect(result?.completed).toBe('Extended token TTL to 24h');
-    expect(result?.next_steps).toBe('Monitor error rates');
+    const result = parseAgentXml(text);
+    expect(result.valid).toBe(true);
+    if (result.valid && result.summary) {
+      expect(result.summary.request).toBe('Fix login bug');
+      expect(result.summary.investigated).toBe('Auth flow and JWT expiry');
+      expect(result.summary.learned).toBe('Token was expiring too soon');
+      expect(result.summary.completed).toBe('Extended token TTL to 24h');
+      expect(result.summary.next_steps).toBe('Monitor error rates');
+    }
   });
 
-  it('returns null when skip_summary tag is present', () => {
-    expect(parseSummary('<skip_summary reason="no work done"/>')).toBeNull();
+  it('treats <skip_summary reason="…"/> as a first-class summary with skipped:true', () => {
+    const result = parseAgentXml('<skip_summary reason="no work done"/>');
+    expect(result.valid).toBe(true);
+    if (result.valid && result.summary) {
+      expect(result.summary.skipped).toBe(true);
+      expect(result.summary.skip_reason).toBe('no work done');
+    }
+  });
+
+  it('does NOT coerce <observation> into a summary (former #1633 path deleted)', () => {
+    const result = parseAgentXml('<observation><title>foo</title></observation>');
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.summary).toBeNull();
+      expect(result.observations).toHaveLength(1);
+    }
+  });
+
+  it('treats first root tag (<observation>) as the result kind when both present', () => {
+    const text = `<observation><title>obs title</title></observation>
+    <summary><request>summary request</request></summary>`;
+    const result = parseAgentXml(text);
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.summary).toBeNull();
+      expect(result.observations).toHaveLength(1);
+      expect(result.observations[0].title).toBe('obs title');
+    }
+  });
+
+  it('returns invalid for empty input', () => {
+    expect(parseAgentXml('').valid).toBe(false);
+    expect(parseAgentXml('   \n  ').valid).toBe(false);
   });
 });

@@ -1,27 +1,15 @@
-/**
- * Shared JSON file utilities for claude-mem.
- *
- * Provides safe read/write helpers used across the CLI and services.
- */
-
 import { existsSync, readFileSync } from 'fs';
-import { logger } from './logger.js';
+import { parseJsonWithBom } from '../shared/atomic-json.js';
 
-/**
- * Read a JSON file safely, returning a default value if the file
- * does not exist. Throws on corrupt JSON to prevent silent data loss
- * when callers merge and write back.
- *
- * @param filePath - Absolute path to the JSON file.
- * @param defaultValue - Value returned when the file is missing.
- * @returns The parsed JSON content, or `defaultValue` when file is missing.
- * @throws {Error} When the file exists but contains invalid JSON.
- */
 export function readJsonSafe<T>(filePath: string, defaultValue: T): T {
   if (!existsSync(filePath)) return defaultValue;
   try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch (error) {
-    throw new Error(`Corrupt JSON file, refusing to overwrite: ${filePath}`);
+    // Windows tooling (PowerShell 5.1, some editors) may rewrite JSON with a
+    // UTF-8 BOM. Node/Bun decode that to U+FEFF at offset 0, which JSON.parse
+    // rejects. Strip on read so install/uninstall and other callers survive.
+    // See #3013.
+    return parseJsonWithBom<T>(readFileSync(filePath, 'utf-8'));
+  } catch (error: unknown) {
+    throw new Error(`Corrupt JSON file, refusing to overwrite: ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

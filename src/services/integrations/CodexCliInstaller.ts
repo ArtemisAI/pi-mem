@@ -1,373 +1,532 @@
-/**
- * CodexCliInstaller - Codex CLI integration for claude-mem
- *
- * Uses transcript-only watching (no notify hook). The watcher infrastructure
- * already exists in src/services/transcripts/. This installer:
- *
- * 1. Writes/merges transcript-watch config to ~/.claude-mem/transcript-watch.json
- * 2. Sets up watch for ~/.codex/sessions/**\/*.jsonl using existing watcher
- * 3. Injects context via ~/.codex/AGENTS.md (Codex reads this natively)
- *
- * Anti-patterns:
- *   - Does NOT add notify hooks -- transcript watching is sufficient
- *   - Does NOT modify existing transcript watcher infrastructure
- *   - Does NOT overwrite existing transcript-watch.json -- merges only
- */
-
 import path from 'path';
 import { homedir } from 'os';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { logger } from '../../utils/logger.js';
-import { replaceTaggedContent } from '../../utils/claude-md-utils.js';
 import {
-  DEFAULT_CONFIG_PATH,
-  DEFAULT_STATE_PATH,
-  SAMPLE_CONFIG,
-} from '../transcripts/config.js';
-import type { TranscriptWatchConfig, WatchTarget } from '../transcripts/types.js';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+  execFileSync,
+  spawnSync,
+  type SpawnSyncReturns,
+} from 'child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { logger } from '../../utils/logger.js';
+import { paths } from '../../shared/paths.js';
+import { buildSpawnSyncInvocation, type SpawnSyncInvocation } from '../../shared/spawn.js';
 
 const CODEX_DIR = path.join(homedir(), '.codex');
 const CODEX_AGENTS_MD_PATH = path.join(CODEX_DIR, 'AGENTS.md');
-const CLAUDE_MEM_DIR = path.join(homedir(), '.claude-mem');
+const CODEX_TRANSCRIPT_WATCH_CONFIG_PATH = paths.transcriptsConfig();
+const CODEX_CONFIG_PATH = path.join(CODEX_DIR, 'config.toml');
+const MARKETPLACE_NAME = 'claude-mem-local';
+const CODEX_PLUGIN_ID = `claude-mem@${MARKETPLACE_NAME}`;
+const LEGACY_CODEX_PLUGIN_IDS = ['claude-mem@thedotmack'];
+const MIN_CODEX_MARKETPLACE_VERSION = '0.128.0';
+const REQUIRED_MARKETPLACE_FILES = [
+  path.join('.agents', 'plugins', 'marketplace.json'),
+  path.join('plugin', '.codex-plugin', 'plugin.json'),
+  path.join('plugin', '.mcp.json'),
+  path.join('plugin', 'hooks', 'codex-hooks.json'),
+  path.join('plugin', 'skills', 'mem-search', 'SKILL.md'),
+];
+const WINDOWS_CODEX_EXTENSIONS = new Set(['.cmd', '.exe', '.bat', '.com']);
 
-/**
- * The watch name used to identify the Codex CLI entry in transcript-watch.json.
- * Must match the name in SAMPLE_CONFIG for merging to work correctly.
- */
-const CODEX_WATCH_NAME = 'codex';
-
-// ---------------------------------------------------------------------------
-// Transcript Watch Config Merging
-// ---------------------------------------------------------------------------
-
-/**
- * Load existing transcript-watch.json, or return an empty config scaffold.
- * Never throws -- returns a valid empty config on any parse error.
- */
-function loadExistingTranscriptWatchConfig(): TranscriptWatchConfig {
-  const configPath = DEFAULT_CONFIG_PATH;
-
-  if (!existsSync(configPath)) {
-    return { version: 1, schemas: {}, watches: [], stateFile: DEFAULT_STATE_PATH };
-  }
-
+function commandExists(command: string): boolean {
   try {
-    const raw = readFileSync(configPath, 'utf-8');
-    const parsed = JSON.parse(raw) as TranscriptWatchConfig;
-
-    // Ensure required fields exist
-    if (!parsed.version) parsed.version = 1;
-    if (!parsed.watches) parsed.watches = [];
-    if (!parsed.schemas) parsed.schemas = {};
-    if (!parsed.stateFile) parsed.stateFile = DEFAULT_STATE_PATH;
-
-    return parsed;
-  } catch (parseError) {
-    logger.error('CODEX', 'Corrupt transcript-watch.json, creating backup', { path: configPath }, parseError as Error);
-
-    // Back up corrupt file
-    const backupPath = `${configPath}.backup.${Date.now()}`;
-    writeFileSync(backupPath, readFileSync(configPath));
-    console.warn(`  Backed up corrupt transcript-watch.json to ${backupPath}`);
-
-    return { version: 1, schemas: {}, watches: [], stateFile: DEFAULT_STATE_PATH };
+    if (process.platform === 'win32') {
+      execFileSync('where.exe', [command], { stdio: 'ignore', windowsHide: true });
+    } else {
+      execFileSync('which', [command], { stdio: 'ignore' });
+    }
+    return true;
+  } catch {
+    // [ANTI-PATTERN IGNORED]: where/which exits non-zero whenever the probed command is absent from PATH; that is the expected negative probe result and commandExists reports it as false.
+    return false;
   }
 }
 
-/**
- * Merge Codex watch configuration into existing transcript-watch.json.
- *
- * - If a watch with name 'codex' already exists, it is replaced in-place.
- * - If the 'codex' schema already exists, it is replaced in-place.
- * - All other watches and schemas are preserved untouched.
- */
-function mergeCodexWatchConfig(existingConfig: TranscriptWatchConfig): TranscriptWatchConfig {
-  const merged = { ...existingConfig };
+function findAncestorWithCodexMarketplace(start: string): string | null {
+  let current = path.resolve(start);
+  while (true) {
+    if (existsSync(path.join(current, '.agents', 'plugins', 'marketplace.json'))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
 
-  // Merge schemas: add/replace the codex schema
-  merged.schemas = { ...merged.schemas };
-  const codexSchema = SAMPLE_CONFIG.schemas?.[CODEX_WATCH_NAME];
-  if (codexSchema) {
-    merged.schemas[CODEX_WATCH_NAME] = codexSchema;
+function missingMarketplaceFiles(root: string): string[] {
+  return REQUIRED_MARKETPLACE_FILES.filter((entry) => !existsSync(path.join(root, entry)));
+}
+
+function assertCodexMarketplaceRoot(root: string): string {
+  const resolved = path.resolve(root);
+  const missing = missingMarketplaceFiles(resolved);
+  if (missing.length > 0) {
+    throw new Error(`Codex marketplace root ${resolved} is missing required files: ${missing.join(', ')}`);
+  }
+  return resolved;
+}
+
+function resolvePluginMarketplaceRoot(preferredRoot?: string): string {
+  if (preferredRoot) {
+    return assertCodexMarketplaceRoot(preferredRoot);
   }
 
-  // Merge watches: add/replace the codex watch entry
-  const codexWatchFromSample = SAMPLE_CONFIG.watches.find(
-    (w: WatchTarget) => w.name === CODEX_WATCH_NAME,
+  const candidates = [
+    process.env.CLAUDE_PLUGIN_ROOT,
+    process.env.PLUGIN_ROOT,
+    process.cwd(),
+    path.dirname(fileURLToPath(import.meta.url)),
+  ].filter((value): value is string => Boolean(value));
+
+  for (const candidate of candidates) {
+    const resolved = findAncestorWithCodexMarketplace(candidate);
+    if (resolved && missingMarketplaceFiles(resolved).length === 0) return resolved;
+  }
+
+  throw new Error('Could not locate a Codex marketplace root with .agents/plugins/marketplace.json and plugin/.codex-plugin/plugin.json. Run npx claude-mem@latest install from the package or repo root.');
+}
+
+function lookupCodexOnWindows(): string | null {
+  let stdout: string;
+  try {
+    stdout = execFileSync('where.exe', ['codex'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    });
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    logger.warn('WORKER', 'Failed to locate codex via where; falling back to codex.cmd', { command: 'where codex' }, err);
+    return null;
+  }
+
+  const candidates = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return candidates.find((candidate) => WINDOWS_CODEX_EXTENSIONS.has(path.extname(candidate).toLowerCase()))
+    ?? candidates[0]
+    ?? null;
+}
+
+export function resolveCodexCommand(
+  platform: NodeJS.Platform = process.platform,
+  windowsLookup: () => string | null = lookupCodexOnWindows,
+): string {
+  if (platform !== 'win32') return 'codex';
+  return windowsLookup() ?? 'codex.cmd';
+}
+
+export function resolveCodexSpawnInvocation(
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  windowsLookup: () => string | null = lookupCodexOnWindows,
+): SpawnSyncInvocation {
+  const resolvedCommand = resolveCodexCommand(platform, windowsLookup);
+  return buildSpawnSyncInvocation(resolvedCommand, args, {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }, platform);
+}
+
+/**
+ * Spawn the `codex` CLI.
+ *
+ * Issue #2695: on Windows `codex` is installed as `codex.cmd` (a PATH shim).
+ * `child_process.spawnSync('codex', args)` without a shell does not consult
+ * PATHEXT, so resolve the shim first. Native executables run directly; .cmd
+ * and .bat shims use an explicit cmd.exe wrapper without the shell option.
+ */
+export function codexSpawn(args: string[]): SpawnSyncReturns<string> {
+  const invocation = resolveCodexSpawnInvocation(args);
+  return spawnSync(invocation.command, invocation.args, invocation.options);
+}
+
+function runCodex(args: string[]): void {
+  const result = codexSpawn(args);
+  const output = console;
+  const stdout = result.stdout?.trimEnd();
+  const stderr = result.stderr?.trimEnd();
+
+  if (stdout) output.log(stdout);
+  if (stderr) output.error(stderr);
+
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const exitCode = result.status ?? 'unknown';
+    throw new Error(`codex ${args.join(' ')} failed with exit code ${exitCode}${stderr ? `: ${stderr}` : ''}`);
+  }
+}
+
+function isMarketplaceDifferentSourceError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes(`marketplace '${MARKETPLACE_NAME}' is already added from a different source`)
+    || message.includes(`marketplace \`${MARKETPLACE_NAME}\` is already added from a different source`);
+}
+
+function registerCodexMarketplace(marketplaceRoot: string): void {
+  try {
+    runCodex(['plugin', 'marketplace', 'add', marketplaceRoot]);
+    return;
+  } catch (error) {
+    if (!isMarketplaceDifferentSourceError(error)) {
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  console.warn(`  Codex marketplace ${MARKETPLACE_NAME} is already registered from another source; replacing it with ${marketplaceRoot}.`);
+  runCodex(['plugin', 'marketplace', 'remove', MARKETPLACE_NAME]);
+  runCodex(['plugin', 'marketplace', 'add', marketplaceRoot]);
+}
+
+export function setTomlBooleanInTable(content: string, header: string, key: string, enabled: boolean): string {
+  const booleanLine = `${key} = ${enabled ? 'true' : 'false'}`;
+  const lines = content.split('\n');
+  const headerIndex = lines.findIndex((line) => line.trim() === header);
+
+  if (headerIndex === -1) {
+    const trimmed = content.trimEnd();
+    return `${trimmed}${trimmed ? '\n\n' : ''}${header}\n${booleanLine}\n`;
+  }
+
+  let sectionEnd = headerIndex + 1;
+  while (sectionEnd < lines.length && !/^\s*\[/.test(lines[sectionEnd])) {
+    sectionEnd += 1;
+  }
+
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const keyPattern = new RegExp(`^\\s*${escapedKey}\\s*=`);
+  const keyIndex = lines.findIndex(
+    (line, index) => index > headerIndex && index < sectionEnd && keyPattern.test(line),
   );
 
-  if (codexWatchFromSample) {
-    const existingWatchIndex = merged.watches.findIndex(
-      (w: WatchTarget) => w.name === CODEX_WATCH_NAME,
-    );
+  if (keyIndex === -1) {
+    lines.splice(headerIndex + 1, 0, booleanLine);
+  } else {
+    lines[keyIndex] = booleanLine;
+  }
 
-    if (existingWatchIndex !== -1) {
-      // Replace existing codex watch in-place
-      merged.watches[existingWatchIndex] = codexWatchFromSample;
+  return lines.join('\n');
+}
+
+export function setTomlPluginEnabled(content: string, pluginId: string, enabled: boolean): string {
+  const escapedPluginId = pluginId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return setTomlBooleanInTable(content, `[plugins."${escapedPluginId}"]`, 'enabled', enabled);
+}
+
+export function setTomlFeatureEnabled(content: string, featureName: string, enabled: boolean): string {
+  return setTomlBooleanInTable(content, '[features]', featureName, enabled);
+}
+
+function normalizeTomlHeader(line: string): string | null {
+  const match = line.trim().match(/^\[([^\]]+)\]\s*$/);
+  if (!match) return null;
+  return match[1].replace(/\s+/g, '').replace(/"/g, '');
+}
+
+function isLegacyMcpSearchHeader(normalizedHeader: string | null): boolean {
+  return normalizedHeader === 'mcp_servers.mcp-search';
+}
+
+function isLegacyMcpSearchChildHeader(normalizedHeader: string | null): boolean {
+  return typeof normalizedHeader === 'string' && normalizedHeader.startsWith('mcp_servers.mcp-search.');
+}
+
+function isClaudeMemMcpSearchBlock(block: string): boolean {
+  return /claude-mem/.test(block);
+}
+
+export function removeLegacyCodexMcpSearchConfig(content: string): string {
+  const lines = content.split('\n');
+  const blocks: Array<{ header: string | null; text: string }> = [];
+  let currentHeader: string | null = null;
+  let currentLines: string[] = [];
+
+  for (const line of lines) {
+    const header = normalizeTomlHeader(line);
+    if (header !== null) {
+      blocks.push({ header: currentHeader, text: currentLines.join('\n') });
+      currentHeader = header;
+      currentLines = [line];
     } else {
-      // Append new codex watch
-      merged.watches.push(codexWatchFromSample);
+      currentLines.push(line);
     }
   }
+  blocks.push({ header: currentHeader, text: currentLines.join('\n') });
 
-  return merged;
+  const removeLegacyMcpSearch = blocks.some(
+    (block) => isLegacyMcpSearchHeader(block.header) && isClaudeMemMcpSearchBlock(block.text),
+  );
+  if (!removeLegacyMcpSearch) return content;
+
+  const kept = blocks.filter((block) =>
+    !isLegacyMcpSearchHeader(block.header) && !isLegacyMcpSearchChildHeader(block.header)
+  );
+  // The stale claude-mem-owned server can have tool child tables; remove the
+  // whole subtree so Codex falls back to the plugin-managed MCP declaration.
+  return kept.map((block) => block.text).join('\n').replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
 }
 
-/**
- * Write the merged transcript-watch.json config atomically.
- */
-function writeTranscriptWatchConfig(config: TranscriptWatchConfig): void {
-  mkdirSync(CLAUDE_MEM_DIR, { recursive: true });
-  writeFileSync(DEFAULT_CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
-}
+function writeCodexPluginConfig(enabled: boolean): boolean {
+  if (!enabled && !existsSync(CODEX_CONFIG_PATH)) return false;
+  mkdirSync(CODEX_DIR, { recursive: true });
+  const current = existsSync(CODEX_CONFIG_PATH) ? readFileSync(CODEX_CONFIG_PATH, 'utf-8') : '';
+  let next = current;
 
-// ---------------------------------------------------------------------------
-// Context Injection (AGENTS.md)
-// ---------------------------------------------------------------------------
-
-/**
- * Inject claude-mem context section into ~/.codex/AGENTS.md.
- * Uses the same <claude-mem-context> tag pattern as CLAUDE.md and GEMINI.md.
- * Preserves any existing user content outside the tags.
- */
-function injectCodexAgentsMdContext(): void {
-  try {
-    mkdirSync(CODEX_DIR, { recursive: true });
-
-    let existingContent = '';
-    if (existsSync(CODEX_AGENTS_MD_PATH)) {
-      existingContent = readFileSync(CODEX_AGENTS_MD_PATH, 'utf-8');
-    }
-
-    // Initial placeholder content -- will be populated after first session
-    const contextContent = [
-      '# Recent Activity',
-      '',
-      '<!-- This section is auto-generated by claude-mem. Edit content outside the tags. -->',
-      '',
-      '*No context yet. Complete your first session and context will appear here.*',
-    ].join('\n');
-
-    const finalContent = replaceTaggedContent(existingContent, contextContent);
-    writeFileSync(CODEX_AGENTS_MD_PATH, finalContent);
-    console.log(`  Injected context placeholder into ${CODEX_AGENTS_MD_PATH}`);
-  } catch (error) {
-    // Non-fatal -- transcript watching still works without context injection
-    logger.warn('CODEX', 'Failed to inject AGENTS.md context', { error: (error as Error).message });
-    console.warn(`  Warning: Could not inject context into AGENTS.md: ${(error as Error).message}`);
+  if (enabled) {
+    next = setTomlFeatureEnabled(next, 'hooks', true);
+    next = removeLegacyCodexMcpSearchConfig(next);
   }
+  for (const legacyPluginId of LEGACY_CODEX_PLUGIN_IDS) {
+    next = setTomlPluginEnabled(next, legacyPluginId, false);
+  }
+  next = setTomlPluginEnabled(next, CODEX_PLUGIN_ID, enabled);
+
+  if (next === current) return false;
+  writeFileSync(CODEX_CONFIG_PATH, next);
+  return true;
 }
 
-/**
- * Remove claude-mem context section from AGENTS.md.
- * Preserves user content outside the <claude-mem-context> tags.
- */
-function removeCodexAgentsMdContext(): void {
-  try {
-    if (!existsSync(CODEX_AGENTS_MD_PATH)) return;
+function enableCodexPluginConfig(): void {
+  const changed = writeCodexPluginConfig(true);
+  console.log(`  Enabled Codex plugin: ${CODEX_PLUGIN_ID}${changed ? '' : ' (already enabled)'}`);
+}
 
-    const content = readFileSync(CODEX_AGENTS_MD_PATH, 'utf-8');
-    const startTag = '<claude-mem-context>';
-    const endTag = '</claude-mem-context>';
+function disableCodexPluginConfig(): void {
+  const changed = writeCodexPluginConfig(false);
+  console.log(`  Disabled Codex plugin: ${CODEX_PLUGIN_ID}${changed ? '' : ' (already disabled)'}`);
+}
 
-    const startIdx = content.indexOf(startTag);
-    const endIdx = content.indexOf(endTag);
+function extractSemver(value: string): string | null {
+  return value.match(/\d+\.\d+\.\d+/)?.[0] ?? null;
+}
 
-    if (startIdx === -1 || endIdx === -1) return;
+function assertCodexMarketplaceSupported(): void {
+  const result = codexSpawn(['--version']);
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.trim();
 
-    // Remove the tagged section and any surrounding blank lines
-    const before = content.substring(0, startIdx).replace(/\n+$/, '');
-    const after = content.substring(endIdx + endTag.length).replace(/^\n+/, '');
-    const finalContent = (before + (after ? '\n\n' + after : '')).trim();
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    console.warn(`  Could not determine Codex CLI version. Continuing; plugin marketplace support requires ${MIN_CODEX_MARKETPLACE_VERSION} or newer.${output ? `\n${output}` : ''}`);
+    return;
+  }
 
-    if (finalContent) {
-      writeFileSync(CODEX_AGENTS_MD_PATH, finalContent + '\n');
-    } else {
-      // File would be empty -- leave it empty rather than deleting
-      // (user may have other tooling that expects it to exist)
-      writeFileSync(CODEX_AGENTS_MD_PATH, '');
-    }
+  const version = extractSemver(output);
+  if (!version) {
+    console.warn(`  Could not parse Codex CLI version from "${output || '<empty>'}". Continuing; plugin marketplace support requires ${MIN_CODEX_MARKETPLACE_VERSION} or newer.`);
+    return;
+  }
 
-    console.log(`  Removed context section from ${CODEX_AGENTS_MD_PATH}`);
-  } catch (error) {
-    logger.warn('CODEX', 'Failed to clean AGENTS.md context', { error: (error as Error).message });
+  if (version.localeCompare(MIN_CODEX_MARKETPLACE_VERSION, undefined, { numeric: true }) < 0) {
+    throw new Error(`Codex CLI ${version} is too old for plugin marketplace support. Update Codex CLI to ${MIN_CODEX_MARKETPLACE_VERSION} or newer, then run: npx claude-mem@latest install`);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Public API: Install
-// ---------------------------------------------------------------------------
+function removeCodexAgentsMdContext(): boolean {
+  if (!existsSync(CODEX_AGENTS_MD_PATH)) return true;
 
-/**
- * Install Codex CLI integration for claude-mem.
- *
- * 1. Merges Codex transcript-watch config into ~/.claude-mem/transcript-watch.json
- * 2. Injects context placeholder into ~/.codex/AGENTS.md
- *
- * @returns 0 on success, 1 on failure
- */
-export async function installCodexCli(): Promise<number> {
-  console.log('\nInstalling Claude-Mem for Codex CLI (transcript watching)...\n');
+  const startTag = '<claude-mem-context>';
+  const endTag = '</claude-mem-context>';
 
   try {
-    // Step 1: Merge transcript-watch config
-    const existingConfig = loadExistingTranscriptWatchConfig();
-    const mergedConfig = mergeCodexWatchConfig(existingConfig);
-    writeTranscriptWatchConfig(mergedConfig);
-    console.log(`  Updated ${DEFAULT_CONFIG_PATH}`);
-    console.log(`  Watch path: ~/.codex/sessions/**/*.jsonl`);
-    console.log(`  Schema: codex (v${SAMPLE_CONFIG.schemas?.codex?.version ?? '?'})`);
-
-    // Step 2: Inject context into AGENTS.md
-    injectCodexAgentsMdContext();
-
-    console.log(`
-Installation complete!
-
-Transcript watch config: ${DEFAULT_CONFIG_PATH}
-Context file: ${CODEX_AGENTS_MD_PATH}
-
-How it works:
-  - claude-mem watches Codex session JSONL files for new activity
-  - No hooks needed -- transcript watching is fully automatic
-  - Context from past sessions is injected via ${CODEX_AGENTS_MD_PATH}
-
-Next steps:
-  1. Start claude-mem worker: npx claude-mem start
-  2. Use Codex CLI as usual -- memory capture is automatic!
-`);
-
-    return 0;
+    readAndStripContextTags(startTag, endTag);
+    return true;
   } catch (error) {
-    console.error(`\nInstallation failed: ${(error as Error).message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn('WORKER', 'Failed to clean AGENTS.md context', { error: message });
+    return false;
+  }
+}
+
+function readAndStripContextTags(startTag: string, endTag: string): void {
+  const content = readFileSync(CODEX_AGENTS_MD_PATH, 'utf-8');
+
+  const startIdx = content.indexOf(startTag);
+  const endIdx = content.indexOf(endTag);
+
+  if (startIdx === -1 || endIdx === -1) return;
+
+  const before = content.substring(0, startIdx).replace(/\n+$/, '');
+  const after = content.substring(endIdx + endTag.length).replace(/^\n+/, '');
+  const finalContent = (before + (after ? '\n\n' + after : '')).trim();
+
+  if (finalContent) {
+    writeFileSync(CODEX_AGENTS_MD_PATH, finalContent + '\n');
+  } else {
+    writeFileSync(CODEX_AGENTS_MD_PATH, '');
+  }
+
+  console.log(`  Removed legacy global context from ${CODEX_AGENTS_MD_PATH}`);
+}
+
+const cleanupLegacyCodexAgentsMdContext = removeCodexAgentsMdContext;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isCodexTranscriptWatch(watch: Record<string, unknown>): boolean {
+  return watch.name === 'codex' || watch.schema === 'codex';
+}
+
+function expandHome(inputPath: string): string {
+  if (inputPath === '~') return homedir();
+  if (inputPath.startsWith('~/') || inputPath.startsWith('~\\')) {
+    return path.join(homedir(), inputPath.slice(2));
+  }
+  return inputPath;
+}
+
+function isLegacyCodexAgentsContext(context: Record<string, unknown>): boolean {
+  if (context.mode !== 'agents') return false;
+
+  const updateOn = context.updateOn;
+  const hasLegacyUpdateOn = Array.isArray(updateOn)
+    && updateOn.length === 2
+    && updateOn.includes('session_start')
+    && updateOn.includes('session_end');
+  if (!hasLegacyUpdateOn) return false;
+
+  if (context.path === undefined) return true;
+  return typeof context.path === 'string'
+    && path.resolve(expandHome(context.path)) === CODEX_AGENTS_MD_PATH;
+}
+
+function disableCodexTranscriptAgentsContext(): boolean {
+  if (!existsSync(CODEX_TRANSCRIPT_WATCH_CONFIG_PATH)) return true;
+
+  try {
+    stripLegacyTranscriptWatchContexts();
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn('WORKER', 'Failed to disable Codex transcript AGENTS.md context', { error: message });
+    return false;
+  }
+}
+
+function stripLegacyTranscriptWatchContexts(): void {
+  const parsed = JSON.parse(readFileSync(CODEX_TRANSCRIPT_WATCH_CONFIG_PATH, 'utf-8')) as unknown;
+  if (!isRecord(parsed) || !Array.isArray(parsed.watches)) return;
+
+  let changed = false;
+  for (const watch of parsed.watches) {
+    if (!isRecord(watch) || !isCodexTranscriptWatch(watch)) continue;
+    if (!isRecord(watch.context) || !isLegacyCodexAgentsContext(watch.context)) continue;
+    delete watch.context;
+    changed = true;
+  }
+
+  if (changed) {
+    writeFileSync(CODEX_TRANSCRIPT_WATCH_CONFIG_PATH, `${JSON.stringify(parsed, null, 2)}\n`);
+    console.log(`  Disabled legacy Codex transcript AGENTS.md context in ${CODEX_TRANSCRIPT_WATCH_CONFIG_PATH}`);
+  }
+}
+
+const cleanupLegacyCodexTranscriptAgentsContext = disableCodexTranscriptAgentsContext;
+
+export async function installCodexCli(marketplaceRootOverride?: string): Promise<number> {
+  console.log('\nInstalling Claude-Mem for Codex CLI (native hooks)...\n');
+
+  if (!commandExists('codex')) {
+    console.error('Codex CLI was not found on PATH.');
+    console.error('Install Codex, then run: npx claude-mem@latest install');
+    return 1;
+  }
+
+  try {
+    return performCodexInstall(marketplaceRootOverride);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`\nInstallation failed: ${message}`);
     return 1;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Public API: Uninstall
-// ---------------------------------------------------------------------------
+function performCodexInstall(marketplaceRootOverride?: string): number {
+  assertCodexMarketplaceSupported();
+  const marketplaceRoot = resolvePluginMarketplaceRoot(marketplaceRootOverride);
 
-/**
- * Remove Codex CLI integration from claude-mem.
- *
- * 1. Removes the codex watch and schema from transcript-watch.json (preserves others)
- * 2. Removes context section from AGENTS.md (preserves user content)
- *
- * @returns 0 on success, 1 on failure
- */
+  console.log(`  Registering Codex plugin marketplace: ${marketplaceRoot}`);
+  registerCodexMarketplace(marketplaceRoot);
+  enableCodexPluginConfig();
+  runCodex(['plugin', 'add', CODEX_PLUGIN_ID]);
+  console.log('  Installed Codex plugin cache.');
+  if (!cleanupLegacyCodexAgentsMdContext()) {
+    console.warn(`  Native Codex hooks registered, but failed to remove legacy AGENTS.md context from ${CODEX_AGENTS_MD_PATH}.`);
+  }
+  if (!cleanupLegacyCodexTranscriptAgentsContext()) {
+    console.warn(`  Native Codex hooks registered, but failed to disable legacy transcript AGENTS.md context in ${CODEX_TRANSCRIPT_WATCH_CONFIG_PATH}.`);
+  }
+
+  console.log(`
+Installation complete!
+
+Codex marketplace: ${MARKETPLACE_NAME}
+Plugin source:     ${marketplaceRoot}
+
+Next steps:
+  1. Open Codex CLI in your project
+  2. Restart any running Codex sessions so native hooks are loaded
+
+For a fresh setup, the supported entry point is:
+  npx claude-mem@latest install
+`);
+  return 0;
+}
+
 export function uninstallCodexCli(): number {
   console.log('\nUninstalling Claude-Mem Codex CLI integration...\n');
 
+  let failed = false;
+
   try {
-    // Step 1: Remove codex watch from transcript-watch.json
-    if (existsSync(DEFAULT_CONFIG_PATH)) {
-      const config = loadExistingTranscriptWatchConfig();
-
-      // Remove codex watch
-      config.watches = config.watches.filter(
-        (w: WatchTarget) => w.name !== CODEX_WATCH_NAME,
-      );
-
-      // Remove codex schema
-      if (config.schemas) {
-        delete config.schemas[CODEX_WATCH_NAME];
-      }
-
-      writeTranscriptWatchConfig(config);
-      console.log(`  Removed codex watch from ${DEFAULT_CONFIG_PATH}`);
-    } else {
-      console.log('  No transcript-watch.json found -- nothing to remove.');
-    }
-
-    // Step 2: Remove context section from AGENTS.md
-    removeCodexAgentsMdContext();
-
-    console.log('\nUninstallation complete!');
-    console.log('Restart claude-mem worker to apply changes.\n');
-
-    return 0;
+    disableCodexPluginConfig();
   } catch (error) {
-    console.error(`\nUninstallation failed: ${(error as Error).message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`\nCodex plugin config update failed: ${message}`);
+    failed = true;
+  }
+
+  try {
+    if (commandExists('codex')) {
+      runCodex(['plugin', 'marketplace', 'remove', MARKETPLACE_NAME]);
+    } else {
+      console.log('  Codex CLI not found; skipping marketplace removal.');
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`\nCodex marketplace removal failed: ${message}`);
+    failed = true;
+  }
+
+  try {
+    if (!cleanupLegacyCodexAgentsMdContext()) {
+      console.error(`\nFailed to remove legacy AGENTS.md context from ${CODEX_AGENTS_MD_PATH}.`);
+      failed = true;
+    }
+    if (!cleanupLegacyCodexTranscriptAgentsContext()) {
+      console.error(`\nFailed to disable legacy transcript AGENTS.md context in ${CODEX_TRANSCRIPT_WATCH_CONFIG_PATH}.`);
+      failed = true;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`\nLegacy context cleanup failed: ${message}`);
+    failed = true;
+  }
+
+  if (failed) {
+    console.error('\nUninstallation completed with errors.');
     return 1;
   }
-}
 
-// ---------------------------------------------------------------------------
-// Public API: Status Check
-// ---------------------------------------------------------------------------
+  console.log('\nUninstallation complete!');
+  console.log('Restart Codex CLI to apply changes.\n');
 
-/**
- * Check Codex CLI integration status.
- *
- * @returns 0 always (informational)
- */
-export function checkCodexCliStatus(): number {
-  console.log('\nClaude-Mem Codex CLI Integration Status\n');
-
-  // Check transcript-watch.json
-  if (!existsSync(DEFAULT_CONFIG_PATH)) {
-    console.log('Status: Not installed');
-    console.log(`  No transcript watch config at ${DEFAULT_CONFIG_PATH}`);
-    console.log('\nRun: npx claude-mem install --ide codex-cli\n');
-    return 0;
-  }
-
-  try {
-    const config = loadExistingTranscriptWatchConfig();
-    const codexWatch = config.watches.find(
-      (w: WatchTarget) => w.name === CODEX_WATCH_NAME,
-    );
-    const codexSchema = config.schemas?.[CODEX_WATCH_NAME];
-
-    if (!codexWatch) {
-      console.log('Status: Not installed');
-      console.log('  transcript-watch.json exists but no codex watch configured.');
-      console.log('\nRun: npx claude-mem install --ide codex-cli\n');
-      return 0;
-    }
-
-    console.log('Status: Installed');
-    console.log(`  Config: ${DEFAULT_CONFIG_PATH}`);
-    console.log(`  Watch path: ${codexWatch.path}`);
-    console.log(`  Schema: ${codexSchema ? `codex (v${codexSchema.version ?? '?'})` : 'missing'}`);
-    console.log(`  Start at end: ${codexWatch.startAtEnd ?? false}`);
-
-    // Check context config
-    if (codexWatch.context) {
-      console.log(`  Context mode: ${codexWatch.context.mode}`);
-      console.log(`  Context path: ${codexWatch.context.path ?? 'default'}`);
-      console.log(`  Context updates on: ${codexWatch.context.updateOn?.join(', ') ?? 'none'}`);
-    }
-
-    // Check AGENTS.md
-    if (existsSync(CODEX_AGENTS_MD_PATH)) {
-      const mdContent = readFileSync(CODEX_AGENTS_MD_PATH, 'utf-8');
-      if (mdContent.includes('<claude-mem-context>')) {
-        console.log(`  Context: Active (${CODEX_AGENTS_MD_PATH})`);
-      } else {
-        console.log(`  Context: AGENTS.md exists but no context tags`);
-      }
-    } else {
-      console.log(`  Context: No AGENTS.md file`);
-    }
-
-    // Check if ~/.codex/sessions exists (indicates Codex has been used)
-    const sessionsDir = path.join(CODEX_DIR, 'sessions');
-    if (existsSync(sessionsDir)) {
-      console.log(`  Sessions directory: exists`);
-    } else {
-      console.log(`  Sessions directory: not yet created (use Codex CLI to generate sessions)`);
-    }
-  } catch {
-    console.log('Status: Unknown');
-    console.log('  Could not parse transcript-watch.json.');
-  }
-
-  console.log('');
   return 0;
 }

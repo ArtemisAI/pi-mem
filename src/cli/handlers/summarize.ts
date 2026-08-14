@@ -1,61 +1,105 @@
-/**
- * Summarize Handler - Stop
- *
- * Runs in the Stop hook (120s timeout, not capped like SessionEnd).
- * This is the ONLY place where we can reliably wait for async work.
- *
- * Flow:
- * 1. Queue summarize request to worker
- * 2. Poll worker until summary processing completes
- * 3. Call /api/sessions/complete to clean up session
- *
- * SessionEnd (1.5s cap from Claude Code) is just a lightweight fallback —
- * all real work must happen here in Stop.
- */
-
+// IO discipline (see src/shared/hook-io.ts): this handler is PURE. It returns a
+// HookResult and MUST NOT call process.stderr.write / process.stdout.write /
+// console.* / process.exit. logger.* calls are DIAGNOSTIC; thrown errors are
+// caught by hookCommand and routed through emitBlockingError.
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
-import { ensureWorkerRunning, workerHttpRequest } from '../../shared/worker-utils.js';
+import { executeWithWorkerFallback, isWorkerFallback } from '../../shared/worker-utils.js';
 import { logger } from '../../utils/logger.js';
 import { extractLastMessage } from '../../shared/transcript-parser.js';
-import { HOOK_EXIT_CODES, HOOK_TIMEOUTS, getTimeout } from '../../shared/hook-constants.js';
+import { stripMemoryTags } from '../../utils/tag-stripping.js';
+import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
+import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { shouldTrackProject } from '../../shared/should-track-project.js';
+import { resolveRuntimeContext, logServerFallback } from '../../services/hooks/runtime-selector.js';
+import type { ServerRuntimeContext } from '../../services/hooks/runtime-selector.js';
+import { isServerClientError } from '../../services/hooks/server-client.js';
 
-const SUMMARIZE_TIMEOUT_MS = getTimeout(HOOK_TIMEOUTS.DEFAULT);
-const POLL_INTERVAL_MS = 500;
-const MAX_WAIT_FOR_SUMMARY_MS = 110_000; // 110s — fits within Stop hook's 120s timeout
+async function summarizeViaServer(
+  runtime: ServerRuntimeContext,
+  sessionId: string,
+  lastAssistantMessage: string,
+  platformSource: string,
+): Promise<HookResult> {
+  // Resolve the server_session_id idempotently. /v1/sessions/start is
+  // idempotent on (projectId, externalSessionId) and returns the
+  // existing row when present.
+  const startResult = await runtime.client.startSession({
+    projectId: runtime.projectId,
+    externalSessionId: sessionId,
+    contentSessionId: sessionId,
+    platformSource,
+  });
+  const serverSessionId = startResult.session.id;
+  // Record the last assistant message as an event before closing the
+  // session so it lands in the generation pipeline.
+  await runtime.client.recordEvent({
+    projectId: runtime.projectId,
+    serverSessionId,
+    contentSessionId: sessionId,
+    platformSource,
+    sourceType: 'hook',
+    eventType: 'assistant_message',
+    occurredAtEpoch: Date.now(),
+    payload: {
+      last_assistant_message: lastAssistantMessage,
+      platformSource,
+    },
+  });
+  await runtime.client.endSession({ sessionId: serverSessionId });
+  logger.debug('HOOK', 'Summary request queued via server');
+  return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+}
 
 export const summarizeHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
-    // Ensure worker is running before any other logic
-    const workerReady = await ensureWorkerRunning();
-    if (!workerReady) {
-      // Worker not available - skip summary gracefully
+    if (input.cwd && !shouldTrackProject(input.cwd)) {
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+
+    if (input.stopHookActive === true) {
+      logger.debug('HOOK', 'Skipping summary: Codex Stop hook re-entry detected', {
+        sessionId: input.sessionId,
+      });
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+
+    if (input.agentId) {
+      logger.debug('HOOK', 'Skipping summary: subagent context detected', {
+        sessionId: input.sessionId,
+        agentId: input.agentId,
+        agentType: input.agentType
+      });
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
     const { sessionId, transcriptPath } = input;
 
-    // Validate required fields before processing
-    if (!transcriptPath) {
-      // No transcript available - skip summary gracefully (not an error)
-      logger.debug('HOOK', `No transcriptPath in Stop hook input for session ${sessionId} - skipping summary`);
+    if (!sessionId) {
+      logger.warn('HOOK', 'summarize: No sessionId provided, skipping');
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
-    // Extract last assistant message from transcript (the work Claude did)
-    // Note: "user" messages in transcripts are mostly tool_results, not actual user input.
-    // The user's original request is already stored in user_prompts table.
     let lastAssistantMessage = '';
-    try {
-      lastAssistantMessage = extractLastMessage(transcriptPath, 'assistant', true);
-    } catch (err) {
-      logger.warn('HOOK', `Stop hook: failed to extract last assistant message for session ${sessionId}: ${err instanceof Error ? err.message : err}`);
-      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+
+    if (input.lastAssistantMessage !== undefined) {
+      lastAssistantMessage = stripMemoryTags(input.lastAssistantMessage);
+    } else {
+      if (!transcriptPath) {
+        logger.debug('HOOK', `No transcriptPath in Stop hook input for session ${sessionId} - skipping summary`);
+        return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+      }
+
+      try {
+        lastAssistantMessage = extractLastMessage(transcriptPath, 'assistant', true);
+        lastAssistantMessage = stripMemoryTags(lastAssistantMessage);
+      } catch (err) {
+        logger.warn('HOOK', `Stop hook: failed to extract last assistant message for session ${sessionId}: ${err instanceof Error ? err.message : err}`);
+        return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+      }
     }
 
-    // Skip summary if transcript has no assistant message (prevents repeated
-    // empty summarize requests that pollute logs — upstream bug)
     if (!lastAssistantMessage || !lastAssistantMessage.trim()) {
-      logger.debug('HOOK', 'No assistant message in transcript - skipping summary', {
+      logger.debug('HOOK', 'No assistant message available - skipping summary', {
         sessionId,
         transcriptPath
       });
@@ -66,62 +110,45 @@ export const summarizeHandler: EventHandler = {
       hasLastAssistantMessage: !!lastAssistantMessage
     });
 
-    // 1. Queue summarize request — worker returns immediately with { status: 'queued' }
-    const response = await workerHttpRequest('/api/sessions/summarize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contentSessionId: sessionId,
-        last_assistant_message: lastAssistantMessage
-      }),
-      timeoutMs: SUMMARIZE_TIMEOUT_MS
-    });
+    const platformSource = normalizePlatformSource(input.platform);
 
-    if (!response.ok) {
-      return { continue: true, suppressOutput: true };
-    }
-
-    logger.debug('HOOK', 'Summary request queued, waiting for completion');
-
-    // 2. Poll worker until pending work for this session is done.
-    //    This keeps the Stop hook alive (120s timeout) so the SDK agent
-    //    can finish processing the summary before SessionEnd kills the session.
-    const waitStart = Date.now();
-    while ((Date.now() - waitStart) < MAX_WAIT_FOR_SUMMARY_MS) {
-      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+    const runtime = resolveRuntimeContext();
+    // Phase 1a (cmem-sdk rename): `runtime.runtime` is the canonical `'server'`
+    // value. Legacy `'server-beta'` is normalized inside `selectRuntime()`.
+    if (runtime.runtime === 'server') {
       try {
-        const statusResponse = await workerHttpRequest(`/api/sessions/status?contentSessionId=${encodeURIComponent(sessionId)}`, {
-          timeoutMs: 5000
-        });
-        if (statusResponse.ok) {
-          const status = await statusResponse.json() as { queueLength?: number };
-          if ((status.queueLength ?? 0) === 0) {
-            logger.info('HOOK', 'Summary processing complete', {
-              waitedMs: Date.now() - waitStart
-            });
-            break;
-          }
+        return await summarizeViaServer(runtime, sessionId, lastAssistantMessage, platformSource);
+      } catch (error: unknown) {
+        if (isServerClientError(error) && error.isFallbackEligible()) {
+          logServerFallback(error.kind, {
+            status: error.status,
+            message: error.message,
+            route: '/v1/sessions/end',
+          });
+          // fall through to worker fallback
+        } else {
+          logger.error('HOOK', 'Server summarize failed (non-recoverable)', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
         }
-      } catch {
-        // Worker may be busy — keep polling
       }
     }
 
-    // 3. Complete the session — clean up active sessions map.
-    //    This runs here in Stop (120s timeout) instead of SessionEnd (1.5s cap)
-    //    so it reliably fires after summary work is done.
-    try {
-      await workerHttpRequest('/api/sessions/complete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contentSessionId: sessionId }),
-        timeoutMs: 10_000
-      });
-      logger.info('HOOK', 'Session completed in Stop hook', { contentSessionId: sessionId });
-    } catch (err) {
-      logger.warn('HOOK', `Stop hook: session-complete failed: ${err instanceof Error ? err.message : err}`);
+    const queueResult = await executeWithWorkerFallback<{ status?: string }>(
+      '/api/sessions/summarize',
+      'POST',
+      {
+        contentSessionId: sessionId,
+        last_assistant_message: lastAssistantMessage,
+        platformSource,
+      },
+    );
+    if (isWorkerFallback(queueResult)) {
+      return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
-    return { continue: true, suppressOutput: true };
-  }
+    logger.debug('HOOK', 'Summary request queued, exiting hook');
+    return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+  },
 };
