@@ -21,6 +21,8 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
+type TimerHandle = ReturnType<typeof setTimeout>;
+
 // =============================================================================
 // Configuration
 // =============================================================================
@@ -211,6 +213,23 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	let contentSessionId: string | null = null;
 	let projectName = "pi-agent";
 	let sessionCwd = process.cwd();
+	// Summarize ONCE per session, at session end. The worker APPENDS a
+	// session_summaries row per /api/sessions/summarize call and context
+	// injection renders every row as its own session line — summarizing on
+	// every agent_end made a multi-turn session look like N duplicate
+	// sessions (observed: 61-220 summaries per session).
+	let sessionSummarized = false;
+	let lastAssistantText = "";
+
+	function flushSummarize(): Promise<void> {
+		if (!contentSessionId || sessionSummarized) return Promise.resolve();
+		sessionSummarized = true;
+		return workerPost("/api/sessions/summarize", {
+			contentSessionId,
+			last_assistant_message: lastAssistantText,
+			platformSource: PLATFORM_SOURCE,
+		}).then(() => undefined);
+	}
 
 	// Check kill switch
 	if (process.env.PI_MEM_DISABLED === "1") {
@@ -349,27 +368,27 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 	// Event: agent_end
 	//
-	// Summarize the session. Uses await so the worker processes the summary
-	// before the agent turn ends. (The previous `/api/sessions/complete`
-	// call was removed — the current worker has no such route, so it 404'd
-	// on every session.)
-	//
-	// Mirrors openclaw/src/index.ts lines 813-845.
+	// Capture the latest assistant message only — the single session summary
+	// is flushed at session_shutdown. The worker APPENDS a session_summaries
+	// row per /api/sessions/summarize call and context injection renders every
+	// row as its own session line, so summarizing per turn made a multi-turn
+	// session show up as dozens of duplicate sessions (observed: 61-220
+	// summaries per session).
 	// =========================================================================
 
-	pi.on("agent_end", async (event) => {
+	pi.on("agent_end", (event) => {
 		if (!contentSessionId) return;
 
-		// Extract last assistant message for summarization
-		let lastAssistantMessage = "";
+		// Keep the latest assistant message for the final summary
+		lastAssistantText = "";
 		if (Array.isArray(event.messages)) {
 			for (let i = event.messages.length - 1; i >= 0; i--) {
 				const msg = event.messages[i];
 				if (msg?.role === "assistant") {
 					if (typeof msg.content === "string") {
-						lastAssistantMessage = msg.content;
+						lastAssistantText = msg.content;
 					} else if (Array.isArray(msg.content)) {
-						lastAssistantMessage = msg.content
+						lastAssistantText = msg.content
 							.filter((block): block is { type: "text"; text: string } => block.type === "text" && "text" in block)
 							.map((block) => block.text)
 							.join("\n");
@@ -378,13 +397,6 @@ export default function piMemExtension(pi: ExtensionAPI) {
 				}
 			}
 		}
-
-		// Await summarize so the worker receives it before the turn ends
-		await workerPost("/api/sessions/summarize", {
-			contentSessionId,
-			last_assistant_message: lastAssistantMessage,
-			platformSource: PLATFORM_SOURCE,
-		});
 	});
 
 	// =========================================================================
@@ -409,6 +421,9 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.on("session_shutdown", () => {
+		// Flush a pending debounced summary before teardown so the session
+		// still gets its final summary even if it ends right after a turn.
+		void flushSummarize();
 		contentSessionId = null;
 	});
 
