@@ -17,11 +17,95 @@
 
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
+
+// =============================================================================
+// Session registry
+//
+// Re-spawning the same task as a new session (common with parallel session
+// managers) created a new claude-mem session per spawn — one investigation
+// showed up as 4-5 near-identical sessions. The registry remembers each
+// session's first prompt so a new spawn whose first prompt is similar enough
+// REUSES the existing session instead of fragmenting observations.
+// =============================================================================
+
+interface SessionRecord {
+	contentSessionId: string;
+	project: string;
+	prompt: string;
+	createdAt: number;
+}
+
+const DEDUP_THRESHOLD = 0.6; // Dice coefficient on word bigrams
+const DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000; // reuse only recent spawns
+const REGISTRY_MAX = 200;
+
+const REGISTRY_PATH = join(process.env.CLAUDE_MEM_DATA_DIR || join(homedir(), ".claude-mem"), "pi-mem-sessions.json");
+
+function loadRegistry(): SessionRecord[] {
+	try {
+		if (existsSync(REGISTRY_PATH)) {
+			const parsed = JSON.parse(readFileSync(REGISTRY_PATH, "utf-8"));
+			if (Array.isArray(parsed)) return parsed as SessionRecord[];
+		}
+	} catch {
+		// corrupt/unreadable — start fresh
+	}
+	return [];
+}
+
+function saveRegistry(records: SessionRecord[]): void {
+	try {
+		mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
+		const tmp = `${REGISTRY_PATH}.tmp`;
+		writeFileSync(tmp, JSON.stringify(records));
+		renameSync(tmp, REGISTRY_PATH);
+	} catch {
+		// best-effort; a lost registry just means a future spawn misses dedup
+	}
+}
+
+/** Dice coefficient on word bigrams over normalized prompts (0..1). */
+function promptSimilarity(a: string, b: string): number {
+	const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 500);
+	const na = norm(a);
+	const nb = norm(b);
+	if (!na || !nb) return 0;
+	if (na === nb) return 1;
+	const bigrams = (s: string) => {
+		const words = s.split(" ");
+		const out = new Set<string>();
+		for (let i = 0; i + 1 < words.length; i++) out.add(`${words[i]} ${words[i + 1]}`);
+		return out;
+	};
+	const ga = bigrams(na);
+	const gb = bigrams(nb);
+	if (ga.size === 0 || gb.size === 0) return 0;
+	let intersection = 0;
+	for (const g of ga) if (gb.has(g)) intersection++;
+	return (2 * intersection) / (ga.size + gb.size);
+}
+
+function findReusableSession(records: SessionRecord[], project: string, prompt: string): string | null {
+	if (process.env.PI_MEM_DISABLE_DEDUP === "1") return null;
+	const now = Date.now();
+	let best: SessionRecord | null = null;
+	let bestScore = DEDUP_THRESHOLD;
+	for (const record of records) {
+		if (record.project !== project) continue;
+		if (now - record.createdAt > DEDUP_WINDOW_MS) continue;
+		const score = promptSimilarity(prompt, record.prompt);
+		if (score > bestScore) {
+			bestScore = score;
+			best = record;
+		}
+	}
+	return best ? best.contentSessionId : null;
+}
 
 // =============================================================================
 // Configuration
@@ -213,6 +297,13 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	let contentSessionId: string | null = null;
 	let projectName = "pi-agent";
 	let sessionCwd = process.cwd();
+	// Session registry: re-spawning the same task as a new session is common
+	// with parallel session managers — without dedup, one investigation
+	// became 4-5 near-identical sessions (observed: S4169-S4174 for a single
+	// OSU deployment check). The registry reuses the existing session when
+	// the new spawn's first prompt is similar.
+	let registry = loadRegistry();
+	let reusedSession = false;
 	// Summarize ONCE per session, at session end. The worker APPENDS a
 	// session_summaries row per /api/sessions/summarize call and context
 	// injection renders every row as its own session line — summarizing on
@@ -247,10 +338,10 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCwd = ctx.cwd;
 		projectName = deriveProjectName(sessionCwd);
-		contentSessionId = `pi-${projectName}-${Date.now()}`;
-
-		// Persist session ID into the session file for compaction recovery
-		pi.appendEntry("pi-mem-session", { contentSessionId, projectName });
+		// contentSessionId is minted at before_agent_start, once the first
+		// prompt is known — that's when the reuse-vs-new decision is made.
+		contentSessionId = null;
+		reusedSession = false;
 	});
 
 	// =========================================================================
@@ -264,12 +355,35 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.on("before_agent_start", async (event) => {
-		if (!contentSessionId) return;
+		const prompt = event.prompt || "pi-agent session";
 
+		// First prompt of the session: reuse an existing session when this
+		// spawn is a re-spawn of the same task (similar first prompt), so a
+		// multi-spawn investigation stays ONE claude-mem session instead of
+		// fragmenting across N near-identical sessions.
+		if (!contentSessionId) {
+			const existing = findReusableSession(registry, projectName, prompt);
+			if (existing) {
+				contentSessionId = existing;
+				reusedSession = true;
+			} else {
+				contentSessionId = `pi-${projectName}-${Date.now()}`;
+				pi.appendEntry("pi-mem-session", { contentSessionId, projectName });
+				const now = Date.now();
+				registry = [
+					...registry.filter((r) => now - r.createdAt < DEDUP_WINDOW_MS * 2).slice(-REGISTRY_MAX),
+					{ contentSessionId, project: projectName, prompt, createdAt: now },
+				];
+				saveRegistry(registry);
+			}
+		}
+
+		// Always init: registers this spawn's prompt for privacy filtering and
+		// (for a reused id) appends the continuation prompt to the session.
 		await workerPost("/api/sessions/init", {
 			contentSessionId,
 			project: projectName,
-			prompt: event.prompt || "pi-agent session",
+			prompt,
 			platformSource: PLATFORM_SOURCE,
 		});
 
@@ -421,9 +535,13 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.on("session_shutdown", () => {
-		// Flush a pending debounced summary before teardown so the session
-		// still gets its final summary even if it ends right after a turn.
-		void flushSummarize();
+		// Flush the session's single summary before teardown. Reused spawns
+		// skip: the original spawn (or another one) already summarizes the
+		// shared session — summarizing again would re-create the duplicate
+		// summary rows this fix removes.
+		if (!reusedSession) {
+			void flushSummarize();
+		}
 		contentSessionId = null;
 	});
 
