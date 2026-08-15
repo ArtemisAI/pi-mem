@@ -17,7 +17,7 @@
 
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -105,6 +105,60 @@ function findReusableSession(records: SessionRecord[], project: string, prompt: 
 		}
 	}
 	return best ? best.contentSessionId : null;
+}
+
+/**
+ * Read the claude-mem session id this OMP session file recorded at mint.
+ * The extension appends a pi-mem-session entry on every mint (the first
+ * before_agent_start of a run). Resuming the same OMP session must CONTINUE
+ * that session — without this, every resume minted a new claude-mem session
+ * (observed: one resumed OMP session became S725 -> S729 -> S739, fragmenting
+ * a single investigation).
+ *
+ * Returns the FIRST recorded id for the current project (the original run
+ * of this OMP session), or null when the file has no entry yet (fresh
+ * session) or is unreadable — the caller then falls back to minting.
+ */
+function readRecordedSessionId(sessionFile: string | undefined, project: string): string | null {
+	if (!sessionFile) return null;
+	try {
+		if (!existsSync(sessionFile)) return null;
+		const size = statSync(sessionFile).size;
+		if (size <= 0 || size > 32 * 1024 * 1024) return null;
+		const fd = openSync(sessionFile, "r");
+		const buf = Buffer.alloc(size);
+		try {
+			readSync(fd, buf, 0, size, 0);
+		} finally {
+			closeSync(fd);
+		}
+		const text = buf.toString("utf8");
+		let from = 0;
+		for (;;) {
+			const idx = text.indexOf('"pi-mem-session"', from);
+			if (idx === -1) break;
+			const lineStart = text.lastIndexOf("\n", idx) + 1;
+			const lineEnd = text.indexOf("\n", idx);
+			const line = (lineEnd === -1 ? text.slice(lineStart) : text.slice(lineStart, lineEnd)).trim();
+			from = idx + 1;
+			if (!line) continue;
+			let parsed: { data?: { contentSessionId?: string; projectName?: string } };
+			try {
+				parsed = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			const id = parsed?.data?.contentSessionId;
+			// FIRST entry for this project: the session's original identity.
+			// Later entries are bug-created fragments — new work should join
+			// the original, not extend a fragment.
+			if (typeof id === "string" && id.length > 0 && parsed.data?.projectName === project) return id;
+		}
+		return null;
+	} catch {
+		// unreadable/corrupt — let the caller mint
+		return null;
+	}
 }
 
 // =============================================================================
@@ -338,10 +392,31 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCwd = ctx.cwd;
 		projectName = deriveProjectName(sessionCwd);
-		// contentSessionId is minted at before_agent_start, once the first
-		// prompt is known — that's when the reuse-vs-new decision is made.
-		contentSessionId = null;
-		reusedSession = false;
+		// Resume continuation: the same OMP session file already records the
+		// claude-mem session id minted by a previous run — reuse it so a
+		// resume continues the SAME session instead of minting a new one
+		// (observed: one resumed OMP session became S725 -> S729 -> S739).
+		// A fresh session has no entry yet, so contentSessionId stays null
+		// and before_agent_start mints as before.
+		const recorded = readRecordedSessionId(ctx.sessionManager?.getSessionFile?.(), projectName);
+		if (recorded) {
+			contentSessionId = recorded;
+			reusedSession = true;
+		} else {
+			contentSessionId = null;
+			reusedSession = false;
+		}
+	});
+
+	// Resume continuation for in-process session switches: resuming from
+	// another session must continue the recorded session id too.
+	pi.on("session_switch", async (event, ctx) => {
+		if (event.reason !== "resume") return;
+		const recorded = readRecordedSessionId(ctx.sessionManager?.getSessionFile?.(), projectName);
+		if (recorded) {
+			contentSessionId = recorded;
+			reusedSession = true;
+		}
 	});
 
 	// =========================================================================
