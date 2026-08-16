@@ -370,6 +370,16 @@ export class SessionRoutes extends BaseRouteHandler {
       return;
     }
 
+    // One summary per session: skip when a summary already exists for this
+    // session. Re-spawned sessions (deduped onto one contentSessionId) each
+    // fire SessionEnd -> summarize, which would stack duplicate S-lines in
+    // the injected context (querySummariesMulti also dedups at render).
+    const sessionRow = store.getSessionById(sessionDbId);
+    if (sessionRow?.memory_session_id && store.getSummaryForSession(sessionRow.memory_session_id, platformSource)) {
+      res.json({ status: 'skipped', reason: 'already_summarized' });
+      return;
+    }
+
     const cleanedLastAssistantMessage = last_assistant_message
       ? stripMemoryTags(String(last_assistant_message))
       : last_assistant_message;

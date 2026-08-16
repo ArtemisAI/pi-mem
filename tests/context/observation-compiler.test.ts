@@ -249,6 +249,38 @@ describe('context compiler platform scoping', () => {
     }
   });
 
+  it('dedupes summaries to the latest row per memory_session_id (re-spawn stacking)', () => {
+    const store = new SessionStore(':memory:');
+    try {
+      const sessionDbId = store.createSDKSession(
+        'dedup-re-spawn-id',
+        'context-platform-project',
+        'dedup prompt',
+        undefined,
+        'claude',
+      );
+      store.ensureMemorySessionIdRegistered(sessionDbId, 'dedup-memory');
+      const summary = {
+        request: 'REQUEST',
+        investigated: 'investigated',
+        learned: 'learned',
+        completed: 'completed',
+        next_steps: 'next',
+        notes: null,
+      };
+      store.storeSummary('dedup-memory', 'context-platform-project', summary, 1, 0, 1_700_000_000_000);
+      store.storeSummary('dedup-memory', 'context-platform-project', summary, 1, 0, 1_700_000_001_000);
+      store.storeSummary('dedup-memory', 'context-platform-project', summary, 1, 0, 1_700_000_002_000);
+
+      const result = querySummariesMulti(store, ['context-platform-project'], config);
+      expect(result).toHaveLength(1);
+      expect(result[0].memory_session_id).toBe('dedup-memory');
+      expect(result[0].created_at_epoch).toBe(1_700_000_002_000);
+    } finally {
+      store.close();
+    }
+  });
+
   it('applies platformSource across multi-project context queries', () => {
     const store = new SessionStore(':memory:');
     try {

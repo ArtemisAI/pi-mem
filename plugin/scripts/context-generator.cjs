@@ -54,9 +54,17 @@ ${A.stack??""}
       ss.project
     FROM session_summaries ss
     LEFT JOIN sdk_sessions s ON ss.memory_session_id = s.memory_session_id
-    WHERE (ss.project IN (${o})
-           OR ss.merged_into_project IN (${o}))
-      AND (? IS NULL OR s.platform_source = ?)
+    WHERE ss.id IN (
+      -- One summary per session: keep the latest row per memory_session_id so
+      -- re-spawned sessions (deduped onto one contentSessionId) don't stack
+      -- duplicate S-lines in the injected context.
+      SELECT MAX(id)
+      FROM session_summaries
+      WHERE (project IN (${o})
+             OR merged_into_project IN (${o}))
+      GROUP BY memory_session_id
+    )
+    AND (? IS NULL OR s.platform_source = ?)
     ORDER BY ss.created_at_epoch DESC
     LIMIT ?
   `).all(...e,...e,n??null,n??null,r.sessionCount+he)}function Zt(t){return t.replace(/[/.]/g,"-")}function er(t){if(!t.includes('"type":"assistant"'))return null;let e=JSON.parse(t);if(e.type==="assistant"&&e.message?.content&&Array.isArray(e.message.content)){let r="";for(let n of e.message.content)n.type==="text"&&(r+=n.text);if(r=r.replace(Ie,"").trim(),r)return r}return null}function tr(t){for(let e=t.length-1;e>=0;e--)try{let r=er(t[e]);if(r)return r}catch(r){r instanceof Error?_.debug("WORKER","Skipping malformed transcript line",{lineIndex:e},r):_.debug("WORKER","Skipping malformed transcript line",{lineIndex:e,error:String(r)});continue}return""}function rr(t){try{if(!(0,G.existsSync)(t))return{assistantMessage:""};let e=(0,G.readFileSync)(t,"utf-8").trim();if(!e)return{assistantMessage:""};let r=e.split(`

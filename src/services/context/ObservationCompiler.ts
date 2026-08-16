@@ -111,9 +111,17 @@ export function querySummariesMulti(
       ss.project
     FROM session_summaries ss
     LEFT JOIN sdk_sessions s ON ss.memory_session_id = s.memory_session_id
-    WHERE (ss.project IN (${projectPlaceholders})
-           OR ss.merged_into_project IN (${projectPlaceholders}))
-      AND (? IS NULL OR s.platform_source = ?)
+    WHERE ss.id IN (
+      -- One summary per session: keep the latest row per memory_session_id so
+      -- re-spawned sessions (deduped onto one contentSessionId) don't stack
+      -- duplicate S-lines in the injected context.
+      SELECT MAX(id)
+      FROM session_summaries
+      WHERE (project IN (${projectPlaceholders})
+             OR merged_into_project IN (${projectPlaceholders}))
+      GROUP BY memory_session_id
+    )
+    AND (? IS NULL OR s.platform_source = ?)
     ORDER BY ss.created_at_epoch DESC
     LIMIT ?
   `).all(
