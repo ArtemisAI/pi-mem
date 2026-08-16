@@ -484,7 +484,11 @@ export default function piMemExtension(pi: ExtensionAPI) {
 		if (!contentSessionId) return;
 
 		const projects = encodeURIComponent(projectName);
-		const contextText = await workerGetText(`/api/context/inject?projects=${projects}`);
+		// Session-scoped injection: pass our contentSessionId so the worker
+		// filters observations to this session's thread. Prevents parallel
+		// sessions on the same project from polluting each other's context
+		// (the worker's inject is project-wide by default).
+		const contextText = await workerGetText(`/api/context/inject?projects=${projects}&session=${encodeURIComponent(contentSessionId)}`);
 
 		if (!contextText) return;
 		const trimmed = contextText.trim();

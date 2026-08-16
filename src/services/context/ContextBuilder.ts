@@ -129,6 +129,17 @@ export interface ContextInjectStats {
 
 const STAT_TYPE_BUCKETS = new Set(['bugfix', 'discovery', 'decision', 'refactor']);
 
+function resolveMemorySessionId(
+  db: { db: Database },
+  contentSessionId: string
+): string | undefined {
+  if (!contentSessionId) return undefined;
+  const row = db.db
+    .prepare(`SELECT memory_session_id FROM sdk_sessions WHERE content_session_id = ? LIMIT 1`)
+    .get(contentSessionId) as { memory_session_id?: string } | undefined;
+  return row?.memory_session_id || undefined;
+}
+
 function buildInjectStats(
   observations: Observation[],
   summaries: SessionSummary[],
@@ -195,7 +206,12 @@ export async function generateContextWithStats(
       ? normalizePlatformSource(input.platformSource)
       : undefined;
     const queryProjects = projects.length > 1 ? projects : [project];
-    const observations = queryObservationsMulti(db, queryProjects, config, platformSource);
+    // Session-scoped injection: when the requesting session is known
+    // (contentSessionId), observations are filtered to that session's thread
+    // so parallel sessions don't pollute each other's context. Summaries stay
+    // project-wide — they are the deduplicated cross-session index.
+    const sessionMemoryId = input?.session ? resolveMemorySessionId(db, input.session) : undefined;
+    const observations = queryObservationsMulti(db, queryProjects, config, platformSource, sessionMemoryId);
     const summaries = querySummariesMulti(db, queryProjects, config, platformSource);
 
     if (observations.length === 0 && summaries.length === 0) {

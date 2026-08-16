@@ -21,7 +21,8 @@ export function queryObservationsMulti(
   db: DatabaseOwner,
   projects: string[],
   config: ContextConfig,
-  platformSource?: string
+  platformSource?: string,
+  memorySessionId?: string
 ): Observation[] {
   const typeArray = Array.from(config.observationTypes);
   const typePlaceholders = typeArray.map(() => '?').join(',');
@@ -52,6 +53,7 @@ export function queryObservationsMulti(
     WHERE (o.project IN (${projectPlaceholders})
            OR o.merged_into_project IN (${projectPlaceholders}))
       AND (? IS NULL OR s.platform_source = ?)
+      AND (? IS NULL OR o.memory_session_id = ?)
       AND type IN (${typePlaceholders})
       AND EXISTS (
         SELECT 1 FROM json_each(o.concepts)
@@ -64,6 +66,8 @@ export function queryObservationsMulti(
     ...projects,
     platformSource ?? null,
     platformSource ?? null,
+    memorySessionId ?? null,
+    memorySessionId ?? null,
     ...typeArray,
     ...conceptArray,
     config.totalObservationCount

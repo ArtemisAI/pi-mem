@@ -283,6 +283,9 @@ export class SearchRoutes extends BaseRouteHandler {
     const projectsParam = (req.query.projects as string) || (req.query.project as string);
     const forHuman = req.query.colors === 'true';
     const full = req.query.full === 'true';
+    const sessionParam = typeof req.query.session === 'string' && req.query.session.length > 0
+      ? req.query.session
+      : undefined;
     const platformSource = this.getOptionalPlatformSourceFromRequest(req);
 
     if (!projectsParam) {
@@ -336,6 +339,7 @@ export class SearchRoutes extends BaseRouteHandler {
       session_id: 'context-inject-' + Date.now(),
       cwd: cwd,
       projects: projects,
+      ...(sessionParam ? { session: sessionParam } : {}),
       ...(platformSource ? { platformSource } : {}),
       full
     };
