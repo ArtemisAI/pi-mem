@@ -1,18 +1,3 @@
-/**
- * OpenCodeInstaller - OpenCode IDE integration installer for claude-mem
- *
- * Installs the claude-mem plugin into OpenCode's plugin directory and
- * sets up context injection via AGENTS.md.
- *
- * Install strategy: File-based (Option A)
- * - Copies the built plugin to the OpenCode plugins directory
- * - Plugins in that directory are auto-loaded at startup
- *
- * Context injection:
- * - Appends/updates <claude-mem-context> section in AGENTS.md
- *
- * Respects OPENCODE_CONFIG_DIR env var for config directory resolution.
- */
 
 import path from 'path';
 import { homedir } from 'os';
@@ -20,16 +5,16 @@ import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync } from 'fs';
 import { logger } from '../../utils/logger.js';
 import { CONTEXT_TAG_OPEN, CONTEXT_TAG_CLOSE, injectContextIntoMarkdownFile } from '../../utils/context-injection.js';
-import { getWorkerPort } from '../../shared/worker-utils.js';
+import { getWorkerHost, getWorkerPort } from '../../shared/worker-utils.js';
 
-// ============================================================================
-// Path Resolution
-// ============================================================================
+const OPENCODE_PLUGIN_CONFIG_PATH = './plugins/claude-mem.js';
 
-/**
- * Resolve the OpenCode config directory.
- * Respects OPENCODE_CONFIG_DIR env var, falls back to ~/.config/opencode.
- */
+type OpenCodeConfig = {
+  $schema?: string;
+  plugin?: unknown;
+  [key: string]: unknown;
+};
+
 export function getOpenCodeConfigDirectory(): string {
   if (process.env.OPENCODE_CONFIG_DIR) {
     return process.env.OPENCODE_CONFIG_DIR;
@@ -37,45 +22,103 @@ export function getOpenCodeConfigDirectory(): string {
   return path.join(homedir(), '.config', 'opencode');
 }
 
-/**
- * Resolve the OpenCode plugins directory.
- */
 export function getOpenCodePluginsDirectory(): string {
   return path.join(getOpenCodeConfigDirectory(), 'plugins');
 }
 
-/**
- * Resolve the AGENTS.md path for context injection.
- */
+export function getOpenCodeConfigPath(): string {
+  return path.join(getOpenCodeConfigDirectory(), 'opencode.json');
+}
+
 export function getOpenCodeAgentsMdPath(): string {
   return path.join(getOpenCodeConfigDirectory(), 'AGENTS.md');
 }
 
-/**
- * Resolve the path to the installed plugin file.
- */
 export function getInstalledPluginPath(): string {
   return path.join(getOpenCodePluginsDirectory(), 'claude-mem.js');
 }
 
-// ============================================================================
-// Plugin Installation
-// ============================================================================
+function getOpenCodePluginEntries(config: OpenCodeConfig): unknown[] {
+  if (Array.isArray(config.plugin)) {
+    return config.plugin;
+  }
+  return config.plugin === undefined ? [] : [config.plugin];
+}
 
-/**
- * Find the built OpenCode plugin bundle.
- * Searches in: dist/opencode-plugin/index.js (built output),
- * then marketplace location.
- */
+export function addOpenCodePluginReference(config: OpenCodeConfig): OpenCodeConfig {
+  const existingPlugins = getOpenCodePluginEntries(config);
+  if (existingPlugins.includes(OPENCODE_PLUGIN_CONFIG_PATH)) {
+    return config;
+  }
+
+  return {
+    ...config,
+    plugin: [...existingPlugins, OPENCODE_PLUGIN_CONFIG_PATH],
+  };
+}
+
+export function removeOpenCodePluginReference(config: OpenCodeConfig): OpenCodeConfig {
+  return {
+    ...config,
+    plugin: getOpenCodePluginEntries(config).filter(
+      (plugin) => plugin !== OPENCODE_PLUGIN_CONFIG_PATH,
+    ),
+  };
+}
+
+export function registerOpenCodePluginInConfig(): number {
+  const configPath = getOpenCodeConfigPath();
+  const defaultConfig: OpenCodeConfig = {
+    $schema: 'https://opencode.ai/config.json',
+  };
+
+  try {
+    const config = existsSync(configPath)
+      ? JSON.parse(readFileSync(configPath, 'utf-8')) as OpenCodeConfig
+      : defaultConfig;
+    const updatedConfig = addOpenCodePluginReference(config);
+
+    writeFileSync(configPath, `${JSON.stringify(updatedConfig, null, 2)}\n`, 'utf-8');
+    console.log(`  Plugin registered in: ${configPath}`);
+    logger.info('OPENCODE', 'Plugin registered in config', { path: configPath });
+
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to register OpenCode plugin in config: ${message}`);
+    return 1;
+  }
+}
+
+export function deregisterOpenCodePluginFromConfig(): number {
+  const configPath = getOpenCodeConfigPath();
+  if (!existsSync(configPath)) {
+    return 0;
+  }
+
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as OpenCodeConfig;
+    const updatedConfig = removeOpenCodePluginReference(config);
+
+    writeFileSync(configPath, `${JSON.stringify(updatedConfig, null, 2)}\n`, 'utf-8');
+    console.log(`  Plugin deregistered from: ${configPath}`);
+    logger.info('OPENCODE', 'Plugin deregistered from config', { path: configPath });
+
+    return 0;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Failed to deregister OpenCode plugin from config: ${message}`);
+    return 1;
+  }
+}
+
 export function findBuiltPluginPath(): string | null {
   const possiblePaths = [
-    // Marketplace install location (production)
     path.join(
       process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), '.claude'),
       'plugins', 'marketplaces', 'thedotmack',
       'dist', 'opencode-plugin', 'index.js',
     ),
-    // Development location (relative to this module's package root)
     path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'dist', 'opencode-plugin', 'index.js'),
   ];
 
@@ -88,12 +131,6 @@ export function findBuiltPluginPath(): string | null {
   return null;
 }
 
-/**
- * Install the claude-mem plugin into OpenCode's plugins directory.
- * Copies the built plugin bundle to ~/.config/opencode/plugins/claude-mem.js
- *
- * @returns 0 on success, 1 on failure
- */
 export function installOpenCodePlugin(): number {
   const builtPluginPath = findBuiltPluginPath();
   if (!builtPluginPath) {
@@ -107,14 +144,17 @@ export function installOpenCodePlugin(): number {
   const destinationPath = getInstalledPluginPath();
 
   try {
-    // Create plugins directory if needed
     mkdirSync(pluginsDirectory, { recursive: true });
 
-    // Copy plugin bundle
     copyFileSync(builtPluginPath, destinationPath);
 
     console.log(`  Plugin installed to: ${destinationPath}`);
     logger.info('OPENCODE', 'Plugin installed', { destination: destinationPath });
+
+    const registerResult = registerOpenCodePluginInConfig();
+    if (registerResult !== 0) {
+      return registerResult;
+    }
 
     return 0;
   } catch (error) {
@@ -124,20 +164,6 @@ export function installOpenCodePlugin(): number {
   }
 }
 
-// ============================================================================
-// Context Injection (AGENTS.md)
-// ============================================================================
-
-/**
- * Inject or update claude-mem context in OpenCode's AGENTS.md file.
- *
- * If the file doesn't exist, creates it with the context section.
- * If the file exists, replaces the existing <claude-mem-context> section
- * or appends one at the end.
- *
- * @param contextContent - The context content to inject (without tags)
- * @returns 0 on success, 1 on failure
- */
 export function injectContextIntoAgentsMd(contextContent: string): number {
   const agentsMdPath = getOpenCodeAgentsMdPath();
 
@@ -152,50 +178,38 @@ export function injectContextIntoAgentsMd(contextContent: string): number {
   }
 }
 
-/**
- * Sync context from the worker into OpenCode's AGENTS.md.
- * Fetches context from the worker API and writes it to AGENTS.md.
- *
- * @param port - Worker port number
- * @param project - Project name for context filtering
- */
-export async function syncContextToAgentsMd(
-  port: number,
-  project: string,
-): Promise<void> {
-  try {
-    const response = await fetch(
-      `http://127.0.0.1:${port}/api/context/inject?project=${encodeURIComponent(project)}`,
-    );
+async function fetchRealContextFromWorker(): Promise<string | null> {
+  const workerHost = getWorkerHost();
+  const workerPort = getWorkerPort();
+  const workerUrl = `http://${workerHost}:${workerPort}`;
+  const healthResponse = await fetch(`${workerUrl}/api/readiness`);
+  if (!healthResponse.ok) return null;
 
-    if (!response.ok) return;
+  const contextResponse = await fetch(
+    `${workerUrl}/api/context/inject?project=opencode`,
+  );
+  if (!contextResponse.ok) return null;
 
-    const contextText = await response.text();
-    if (contextText && contextText.trim()) {
-      const injectResult = injectContextIntoAgentsMd(contextText);
-      if (injectResult !== 0) {
-        logger.warn('OPENCODE', 'Failed to inject context into AGENTS.md during sync');
-      }
-    }
-  } catch {
-    // Worker not available — non-critical
+  const realContext = await contextResponse.text();
+  return realContext && realContext.trim() ? realContext : null;
+}
+
+function writeOrRemoveCleanedAgentsMd(agentsMdPath: string, trimmedContent: string): void {
+  if (
+    trimmedContent.length === 0 ||
+    trimmedContent === '# Claude-Mem Memory Context'
+  ) {
+    unlinkSync(agentsMdPath);
+    console.log(`  Removed empty AGENTS.md`);
+  } else {
+    writeFileSync(agentsMdPath, trimmedContent + '\n', 'utf-8');
+    console.log(`  Cleaned context from AGENTS.md`);
   }
 }
 
-// ============================================================================
-// Uninstallation
-// ============================================================================
-
-/**
- * Remove the claude-mem plugin from OpenCode.
- * Removes the plugin file and cleans up the AGENTS.md context section.
- *
- * @returns 0 on success, 1 on failure
- */
 export function uninstallOpenCodePlugin(): number {
   let hasErrors = false;
 
-  // Remove plugin file
   const pluginPath = getInstalledPluginPath();
   if (existsSync(pluginPath)) {
     try {
@@ -208,52 +222,45 @@ export function uninstallOpenCodePlugin(): number {
     }
   }
 
-  // Remove context section from AGENTS.md
+  if (deregisterOpenCodePluginFromConfig() !== 0) {
+    hasErrors = true;
+  }
+
   const agentsMdPath = getOpenCodeAgentsMdPath();
   if (existsSync(agentsMdPath)) {
+    let content: string;
     try {
-      let content = readFileSync(agentsMdPath, 'utf-8');
-      const tagStartIndex = content.indexOf(CONTEXT_TAG_OPEN);
-      const tagEndIndex = content.indexOf(CONTEXT_TAG_CLOSE);
-
-      if (tagStartIndex !== -1 && tagEndIndex !== -1) {
-        content =
-          content.slice(0, tagStartIndex).trimEnd() +
-          '\n' +
-          content.slice(tagEndIndex + CONTEXT_TAG_CLOSE.length).trimStart();
-
-        // If the file is now essentially empty or only has our header, remove it
-        const trimmedContent = content.trim();
-        if (
-          trimmedContent.length === 0 ||
-          trimmedContent === '# Claude-Mem Memory Context'
-        ) {
-          unlinkSync(agentsMdPath);
-          console.log(`  Removed empty AGENTS.md`);
-        } else {
-          writeFileSync(agentsMdPath, trimmedContent + '\n', 'utf-8');
-          console.log(`  Cleaned context from AGENTS.md`);
-        }
-      }
+      content = readFileSync(agentsMdPath, 'utf-8');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`  Failed to clean AGENTS.md: ${message}`);
+      console.error(`  Failed to read AGENTS.md: ${message}`);
       hasErrors = true;
+      content = '';
+    }
+
+    const tagStartIndex = content.indexOf(CONTEXT_TAG_OPEN);
+    const tagEndIndex = content.indexOf(CONTEXT_TAG_CLOSE);
+
+    if (tagStartIndex !== -1 && tagEndIndex !== -1) {
+      content =
+        content.slice(0, tagStartIndex).trimEnd() +
+        '\n' +
+        content.slice(tagEndIndex + CONTEXT_TAG_CLOSE.length).trimStart();
+
+      const trimmedContent = content.trim();
+      try {
+        writeOrRemoveCleanedAgentsMd(agentsMdPath, trimmedContent);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`  Failed to clean AGENTS.md: ${message}`);
+        hasErrors = true;
+      }
     }
   }
 
   return hasErrors ? 1 : 0;
 }
 
-// ============================================================================
-// Status Check
-// ============================================================================
-
-/**
- * Check OpenCode integration status.
- *
- * @returns 0 always (informational only)
- */
 export function checkOpenCodeStatus(): number {
   console.log('\nClaude-Mem OpenCode Integration Status\n');
 
@@ -283,74 +290,42 @@ export function checkOpenCodeStatus(): number {
   return 0;
 }
 
-// ============================================================================
-// Full Install Flow (used by npx install command)
-// ============================================================================
-
-/**
- * Run the full OpenCode installation: plugin + context injection.
- *
- * @returns 0 on success, 1 on failure
- */
 export async function installOpenCodeIntegration(): Promise<number> {
   console.log('\nInstalling Claude-Mem for OpenCode...\n');
 
-  // Step 1: Install plugin
   const pluginResult = installOpenCodePlugin();
   if (pluginResult !== 0) {
     return pluginResult;
   }
 
-  // Step 2: Create initial context in AGENTS.md
   const placeholderContext = `# Memory Context from Past Sessions
 
 *No context yet. Complete your first session and context will appear here.*
 
 Use claude-mem search tools for manual memory queries.`;
 
-  // Try to fetch real context from worker first
+  let contextToInject = placeholderContext;
+  let contextSource = 'placeholder';
   try {
-    const workerPort = getWorkerPort();
-    const healthResponse = await fetch(`http://127.0.0.1:${workerPort}/api/readiness`);
-    if (healthResponse.ok) {
-      const contextResponse = await fetch(
-        `http://127.0.0.1:${workerPort}/api/context/inject?project=opencode`,
-      );
-      if (contextResponse.ok) {
-        const realContext = await contextResponse.text();
-        if (realContext && realContext.trim()) {
-          const injectResult = injectContextIntoAgentsMd(realContext);
-          if (injectResult !== 0) {
-            logger.warn('OPENCODE', 'Failed to inject real context into AGENTS.md during install');
-          } else {
-            console.log('  Context injected from existing memory');
-          }
-        } else {
-          const injectResult = injectContextIntoAgentsMd(placeholderContext);
-          if (injectResult !== 0) {
-            logger.warn('OPENCODE', 'Failed to inject placeholder context into AGENTS.md during install');
-          } else {
-            console.log('  Placeholder context created (will populate after first session)');
-          }
-        }
-      } else {
-        const injectResult = injectContextIntoAgentsMd(placeholderContext);
-        if (injectResult !== 0) {
-          logger.warn('OPENCODE', 'Failed to inject placeholder context into AGENTS.md during install');
-        }
-      }
-    } else {
-      const injectResult = injectContextIntoAgentsMd(placeholderContext);
-      if (injectResult !== 0) {
-        logger.warn('OPENCODE', 'Failed to inject placeholder context into AGENTS.md during install');
-      } else {
-        console.log('  Placeholder context created (worker not running)');
-      }
+    const realContext = await fetchRealContextFromWorker();
+    if (realContext) {
+      contextToInject = realContext;
+      contextSource = 'existing memory';
     }
-  } catch {
-    const injectResult = injectContextIntoAgentsMd(placeholderContext);
-    if (injectResult !== 0) {
-      logger.warn('OPENCODE', 'Failed to inject placeholder context into AGENTS.md during install');
+  } catch (error) {
+    if (error instanceof Error) {
+      logger.debug('WORKER', 'Worker not available during OpenCode install', {}, error);
+    } else {
+      logger.debug('WORKER', 'Worker not available during OpenCode install', {}, new Error(String(error)));
+    }
+  }
+
+  const injectResult = injectContextIntoAgentsMd(contextToInject);
+  if (injectResult !== 0) {
+    logger.warn('OPENCODE', `Failed to inject ${contextSource} context into AGENTS.md during install`);
+  } else {
+    if (contextSource === 'existing memory') {
+      console.log('  Context injected from existing memory');
     } else {
       console.log('  Placeholder context created (worker not running)');
     }

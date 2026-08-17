@@ -13,12 +13,14 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 
 | Setting                       | Default                         | Description                           |
 |-------------------------------|---------------------------------|---------------------------------------|
-| `CLAUDE_MEM_MODEL`            | `sonnet`                        | AI model for processing observations (when using Claude) |
+| `CLAUDE_MEM_MODEL`            | `claude-haiku-4-5-20251001`     | Claude model used to compress observations (when using the Claude provider) |
 | `CLAUDE_MEM_PROVIDER`         | `claude`                        | AI provider: `claude`, `gemini`, or `openrouter` |
+| `CLAUDE_MEM_CLAUDE_AUTH_METHOD` | `subscription`                | Claude provider auth mode: `subscription`, `api-key`, or `gateway` |
 | `CLAUDE_MEM_MODE`             | `code`                          | Active mode profile (e.g., `code--es`, `email-investigation`) |
 | `CLAUDE_MEM_CONTEXT_OBSERVATIONS` | `50`                        | Number of observations to inject      |
-| `CLAUDE_MEM_WORKER_PORT`      | `37777`                         | Worker service port                   |
+| `CLAUDE_MEM_WORKER_PORT`      | `37700 + (uid % 100)`           | Worker service port (per-user default; override for fixed port) |
 | `CLAUDE_MEM_WORKER_HOST`      | `127.0.0.1`                     | Worker service host address           |
+| `CLAUDE_MEM_DATA_DIR`         | `~/.claude-mem`                 | Data root — every other path (database, chroma, logs, settings.json, worker.pid) derives from this |
 | `CLAUDE_MEM_SKIP_TOOLS`       | `ListMcpResourcesTool,SlashCommand,Skill,TodoWrite,AskUserQuestion` | Comma-separated tools to exclude from observations |
 
 ### Gemini Provider Settings
@@ -26,7 +28,7 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 | Setting                       | Default                         | Description                           |
 |-------------------------------|---------------------------------|---------------------------------------|
 | `CLAUDE_MEM_GEMINI_API_KEY`   | —                               | Gemini API key ([get free key](https://aistudio.google.com/app/apikey)) |
-| `CLAUDE_MEM_GEMINI_MODEL`     | `gemini-2.5-flash-lite`          | Gemini model: `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-3-flash-preview` |
+| `CLAUDE_MEM_GEMINI_MODEL`     | `gemini-flash-latest`          | Gemini model: `gemini-flash-latest`, `gemini-flash-lite-latest`, `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview` |
 
 See [Gemini Provider](usage/gemini-provider) for detailed configuration and free tier information.
 
@@ -36,12 +38,22 @@ See [Gemini Provider](usage/gemini-provider) for detailed configuration and free
 |----------------------------------------------|-----------------------------|---------------------------------------|
 | `CLAUDE_MEM_OPENROUTER_API_KEY`              | —                           | OpenRouter API key ([get key](https://openrouter.ai/keys)) |
 | `CLAUDE_MEM_OPENROUTER_MODEL`                | `xiaomi/mimo-v2-flash:free` | Model identifier (supports 100+ models) |
-| `CLAUDE_MEM_OPENROUTER_MAX_CONTEXT_MESSAGES` | `20`                        | Max messages in conversation history  |
-| `CLAUDE_MEM_OPENROUTER_MAX_TOKENS`           | `100000`                    | Token budget safety limit             |
 | `CLAUDE_MEM_OPENROUTER_SITE_URL`             | —                           | Optional: URL for analytics           |
 | `CLAUDE_MEM_OPENROUTER_APP_NAME`             | `claude-mem`                | Optional: App name for analytics      |
 
 See [OpenRouter Provider](usage/openrouter-provider) for detailed configuration, free model list, and usage guide.
+
+### Claude Gateway Settings
+
+Gateway credentials live in `~/.claude-mem/.env`, not `settings.json`.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `ANTHROPIC_BASE_URL` | none | LiteLLM or Anthropic-compatible gateway URL for the Claude Agent SDK path |
+| `ANTHROPIC_AUTH_TOKEN` | none | Optional LiteLLM master key or virtual key |
+| `ANTHROPIC_API_KEY` | none | Direct Anthropic API key; normally omit this in LiteLLM gateway mode |
+
+Use [LiteLLM Gateway](configuration/litellm-gateway) when you want `CLAUDE_MEM_PROVIDER=claude` to route through LiteLLM while preserving the Claude Agent SDK worker path.
 
 ### System Configuration
 
@@ -54,23 +66,19 @@ See [OpenRouter Provider](usage/openrouter-provider) for detailed configuration,
 
 ## Model Configuration
 
-Configure which AI model processes your observations.
+Configure which Claude model compresses your observations (only applies when `CLAUDE_MEM_PROVIDER=claude`).
 
 ### Available Models
 
-Shorthand model names automatically forward to the latest version:
+| Value | Notes |
+|-------|-------|
+| `claude-haiku-4-5-20251001` | Default — fast and cheap, ideal for compression |
+| `claude-sonnet-5` | Balanced quality and cost |
+| `claude-opus-4-8` | Highest quality, most expensive |
 
-- `haiku` - Fast, cost-efficient
-- `sonnet` - Balanced (default)
-- `opus` - Most capable
+### Picking via the Installer
 
-### Using the Interactive Script
-
-```bash
-./claude-mem-settings.sh
-```
-
-This script manages settings in `~/.claude-mem/settings.json`.
+`npx claude-mem install` prompts for the Claude model (when the Claude provider is selected) and persists the choice to `~/.claude-mem/settings.json`.
 
 ### Manual Configuration
 
@@ -78,7 +86,7 @@ Edit `~/.claude-mem/settings.json`:
 
 ```json
 {
-  "CLAUDE_MEM_MODEL": "sonnet"
+  "CLAUDE_MEM_MODEL": "claude-haiku-4-5-20251001"
 }
 ```
 
@@ -119,8 +127,8 @@ The data directory location depends on the environment:
 ```
 ~/.claude-mem/
 ├── claude-mem.db           # SQLite database
-├── .install-version        # Cached version for smart installer
-├── worker.port             # Current worker port file
+├── .install-version        # Version marker written by `npx claude-mem install`/`repair`
+├── settings.json           # Worker port + provider/model settings
 └── logs/
     ├── worker-out.log      # Worker stdout logs
     └── worker-error.log    # Worker stderr logs
@@ -136,7 +144,7 @@ ${CLAUDE_PLUGIN_ROOT}/
 ├── hooks/
 │   └── hooks.json          # Hook configuration
 ├── scripts/                # Built executables
-│   ├── smart-install.js    # Smart installer script
+│   ├── version-check.js    # Sub-100ms Setup-hook version marker check
 │   ├── context-hook.js     # Context injection hook
 │   ├── new-hook.js         # Session creation hook
 │   ├── save-hook.js        # Observation capture hook
@@ -151,44 +159,16 @@ ${CLAUDE_PLUGIN_ROOT}/
 
 ### Hooks Configuration
 
-Hooks are configured in `plugin/hooks/hooks.json`:
+Hooks are registered in `plugin/hooks/hooks.json`. The current shape uses a single dispatcher (`worker-service.cjs hook claude-code <event>`) launched through `bun-runner.js`, plus a fast Setup-phase `version-check.js`. The events wired up are:
 
-```json
-{
-  "description": "Claude-mem memory system hooks",
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/smart-install.js && node ${CLAUDE_PLUGIN_ROOT}/scripts/context-hook.js",
-        "timeout": 120
-      }]
-    }],
-    "UserPromptSubmit": [{
-      "hooks": [{
-        "type": "command",
-        "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/new-hook.js",
-        "timeout": 120
-      }]
-    }],
-    "PostToolUse": [{
-      "matcher": "*",
-      "hooks": [{
-        "type": "command",
-        "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/save-hook.js",
-        "timeout": 120
-      }]
-    }],
-    "Stop": [{
-      "hooks": [{
-        "type": "command",
-        "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/summary-hook.js",
-        "timeout": 120
-      }]
-    }]
-  }
-}
-```
+- `Setup` → `version-check.js` (sub-100ms `.install-version` check)
+- `SessionStart` → start the worker, then `hook claude-code context` (context injection)
+- `UserPromptSubmit` → `hook claude-code session-init`
+- `PreToolUse` (matcher `Read`) → `hook claude-code file-context`
+- `PostToolUse` (matcher `*`) → `hook claude-code observation`
+- `Stop` → `hook claude-code summarize`
+
+The exact `hooks.json` entries are written by the installer; do not hand-edit them in the marketplace copy unless you know what you're doing.
 
 ### Search Configuration
 
@@ -198,30 +178,8 @@ Claude-Mem provides MCP search tools for querying your project history.
 
 Search operations are provided via:
 - **MCP Server**: 3 tools (search, timeline, get_observations) with progressive disclosure
-- **HTTP API**: 10 endpoints on worker service port 37777
+- **HTTP API**: 10 endpoints on the worker service port (per-user, default `37700 + (uid % 100)`; see `~/.claude-mem/settings.json`)
 - **Auto-Invocation**: Claude recognizes natural language queries about past work
-
-## Version Channel
-
-Claude-Mem supports switching between stable and beta versions via the web viewer UI.
-
-### Accessing Version Channel
-
-1. Open the viewer at http://localhost:37777
-2. Click the Settings gear icon
-3. Find the **Version Channel** section
-
-### Switching Versions
-
-- **Try Beta**: Click "Try Beta (Endless Mode)" to switch to the beta branch with experimental features
-- **Switch to Stable**: Click "Switch to Stable" to return to the production release
-- **Check for Updates**: Pull the latest changes for your current branch
-
-**Your memory data is preserved** when switching versions. Only the plugin code changes.
-
-<Note>
-Endless Mode is experimental and slower than standard mode. See [Beta Features](beta-features) for full details and important limitations.
-</Note>
 
 ## Worker Service Management
 
@@ -243,7 +201,7 @@ Claude-Mem injects past observations into each new session, giving Claude awaren
 
 ### Context Settings Modal
 
-Access the settings modal from the web viewer at http://localhost:37777:
+Access the settings modal from the web viewer. The worker prints its URL on startup; the port comes from `CLAUDE_MEM_WORKER_PORT`.
 
 1. Click the **gear icon** in the header
 2. Adjust settings in the right panel
@@ -315,7 +273,7 @@ Token economics help you understand the value of cached observations vs. re-read
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Model** | sonnet | AI model for generating observations |
-| **Worker Port** | 37777 | Port for background worker service |
+| **Worker Port** | `37700 + (uid % 100)` | Port for background worker service (override with `CLAUDE_MEM_WORKER_PORT`) |
 | **MCP search server** | true | Enable Model Context Protocol search tools |
 | **Include last summary** | false | Add previous session's summary to context |
 | **Include last message** | false | Add previous session's final message |
@@ -340,7 +298,7 @@ Settings are stored in `~/.claude-mem/settings.json`:
 }
 ```
 
-**Note**: The Context Settings Modal (at http://localhost:37777) is the recommended way to configure these settings, as it provides live preview of changes.
+**Note**: The Context Settings Modal (in the web viewer) is the recommended way to configure these settings, as it provides live preview of changes.
 
 ## Customization
 
@@ -411,22 +369,16 @@ Changes take effect on the next tool execution (no worker restart needed).
 
 ### Hook Timeouts
 
-Modify timeouts in `plugin/hooks/hooks.json`:
+Hook timeouts are written into `plugin/hooks/hooks.json` by the installer. The current defaults match the shape of the workload at each lifecycle stage:
 
-```json
-{
-  "timeout": 120  // Default: 120 seconds
-}
-```
-
-Recommended values:
-- SessionStart: 120s (needs time for smart install check and context retrieval)
+- Setup (`version-check.js`): 300s ceiling but normally < 100ms — only reads `.install-version`
+- SessionStart (worker-start + context): 60s
 - UserPromptSubmit: 60s
-- PostToolUse: 120s (can process many observations)
-- Stop: 60s
-- SessionEnd: 60s
+- PreToolUse (file-context, Read matcher): 60s
+- PostToolUse (observation): 120s
+- Stop (summary): 120s
 
-**Note**: With smart install caching (v5.0.3+), SessionStart is typically very fast (10ms) unless dependencies need installation.
+The Setup hook never installs anything — runtime install (Bun, uv, `bun install`) happens in `npx claude-mem install` / `npx claude-mem repair` outside the session lifecycle.
 
 ### Worker Memory Limit
 
@@ -472,16 +424,15 @@ npm run worker:logs
 
 ### Invalid Model Name
 
-If you specify an invalid model name, the worker will fall back to `sonnet` and log a warning.
+If you specify an invalid Claude model name, the worker logs a warning and uses the default. Valid Claude models for `CLAUDE_MEM_MODEL`:
 
-Valid shorthand models (forward to latest version):
-- haiku
-- sonnet
-- opus
+- `claude-haiku-4-5-20251001` (default)
+- `claude-sonnet-5`
+- `claude-opus-4-8`
 
 ### Port Already in Use
 
-If port 37777 is already in use:
+The default worker port is `37700 + (uid % 100)`, so different OS users on the same machine get different ports automatically. If you still hit a collision (e.g. running multiple profiles as the same UID), set a fixed port:
 
 1. Set custom port:
    ```bash
@@ -495,7 +446,7 @@ If port 37777 is already in use:
 
 3. Verify new port:
    ```bash
-   cat ~/.claude-mem/worker.port
+   curl -s http://127.0.0.1:$CLAUDE_MEM_WORKER_PORT/api/health | jq .port
    ```
 
 ## Next Steps

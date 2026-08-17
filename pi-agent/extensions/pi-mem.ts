@@ -17,9 +17,149 @@
 
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+// =============================================================================
+// Session registry
+//
+// Re-spawning the same task as a new session (common with parallel session
+// managers) created a new claude-mem session per spawn — one investigation
+// showed up as 4-5 near-identical sessions. The registry remembers each
+// session's first prompt so a new spawn whose first prompt is similar enough
+// REUSES the existing session instead of fragmenting observations.
+// =============================================================================
+
+interface SessionRecord {
+	contentSessionId: string;
+	project: string;
+	prompt: string;
+	createdAt: number;
+}
+
+const DEDUP_THRESHOLD = 0.6; // Dice coefficient on word bigrams
+const DEDUP_WINDOW_MS = 12 * 60 * 60 * 1000; // reuse only recent spawns
+const REGISTRY_MAX = 200;
+
+const REGISTRY_PATH = join(process.env.CLAUDE_MEM_DATA_DIR || join(homedir(), ".claude-mem"), "pi-mem-sessions.json");
+
+function loadRegistry(): SessionRecord[] {
+	try {
+		if (existsSync(REGISTRY_PATH)) {
+			const parsed = JSON.parse(readFileSync(REGISTRY_PATH, "utf-8"));
+			if (Array.isArray(parsed)) return parsed as SessionRecord[];
+		}
+	} catch {
+		// corrupt/unreadable — start fresh
+	}
+	return [];
+}
+
+function saveRegistry(records: SessionRecord[]): void {
+	try {
+		mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
+		const tmp = `${REGISTRY_PATH}.tmp`;
+		writeFileSync(tmp, JSON.stringify(records));
+		renameSync(tmp, REGISTRY_PATH);
+	} catch {
+		// best-effort; a lost registry just means a future spawn misses dedup
+	}
+}
+
+/** Dice coefficient on word bigrams over normalized prompts (0..1). */
+function promptSimilarity(a: string, b: string): number {
+	const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 500);
+	const na = norm(a);
+	const nb = norm(b);
+	if (!na || !nb) return 0;
+	if (na === nb) return 1;
+	const bigrams = (s: string) => {
+		const words = s.split(" ");
+		const out = new Set<string>();
+		for (let i = 0; i + 1 < words.length; i++) out.add(`${words[i]} ${words[i + 1]}`);
+		return out;
+	};
+	const ga = bigrams(na);
+	const gb = bigrams(nb);
+	if (ga.size === 0 || gb.size === 0) return 0;
+	let intersection = 0;
+	for (const g of ga) if (gb.has(g)) intersection++;
+	return (2 * intersection) / (ga.size + gb.size);
+}
+
+function findReusableSession(records: SessionRecord[], project: string, prompt: string): string | null {
+	if (process.env.PI_MEM_DISABLE_DEDUP === "1") return null;
+	const now = Date.now();
+	let best: SessionRecord | null = null;
+	let bestScore = DEDUP_THRESHOLD;
+	for (const record of records) {
+		if (record.project !== project) continue;
+		if (now - record.createdAt > DEDUP_WINDOW_MS) continue;
+		const score = promptSimilarity(prompt, record.prompt);
+		if (score > bestScore) {
+			bestScore = score;
+			best = record;
+		}
+	}
+	return best ? best.contentSessionId : null;
+}
+
+/**
+ * Read the claude-mem session id this OMP session file recorded at mint.
+ * The extension appends a pi-mem-session entry on every mint (the first
+ * before_agent_start of a run). Resuming the same OMP session must CONTINUE
+ * that session — without this, every resume minted a new claude-mem session
+ * (observed: one resumed OMP session became S725 -> S729 -> S739, fragmenting
+ * a single investigation).
+ *
+ * Returns the FIRST recorded id for the current project (the original run
+ * of this OMP session), or null when the file has no entry yet (fresh
+ * session) or is unreadable — the caller then falls back to minting.
+ */
+function readRecordedSessionId(sessionFile: string | undefined, project: string): string | null {
+	if (!sessionFile) return null;
+	try {
+		if (!existsSync(sessionFile)) return null;
+		const size = statSync(sessionFile).size;
+		if (size <= 0 || size > 32 * 1024 * 1024) return null;
+		const fd = openSync(sessionFile, "r");
+		const buf = Buffer.alloc(size);
+		try {
+			readSync(fd, buf, 0, size, 0);
+		} finally {
+			closeSync(fd);
+		}
+		const text = buf.toString("utf8");
+		let from = 0;
+		for (;;) {
+			const idx = text.indexOf('"pi-mem-session"', from);
+			if (idx === -1) break;
+			const lineStart = text.lastIndexOf("\n", idx) + 1;
+			const lineEnd = text.indexOf("\n", idx);
+			const line = (lineEnd === -1 ? text.slice(lineStart) : text.slice(lineStart, lineEnd)).trim();
+			from = idx + 1;
+			if (!line) continue;
+			let parsed: { data?: { contentSessionId?: string; projectName?: string } };
+			try {
+				parsed = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			const id = parsed?.data?.contentSessionId;
+			// FIRST entry for this project: the session's original identity.
+			// Later entries are bug-created fragments — new work should join
+			// the original, not extend a fragment.
+			if (typeof id === "string" && id.length > 0 && parsed.data?.projectName === project) return id;
+		}
+		return null;
+	} catch {
+		// unreadable/corrupt — let the caller mint
+		return null;
+	}
+}
 
 // =============================================================================
 // Configuration
@@ -41,17 +181,19 @@ function discoverWorkerHost(): string {
 }
 
 function discoverWorkerPort(): number {
-  if (process.env.CLAUDE_MEM_PORT) {
-    const parsed = parseInt(process.env.CLAUDE_MEM_PORT, 10);
-    if (Number.isFinite(parsed)) return parsed;
-  }
+  const fromEnv = parseInt(process.env.CLAUDE_MEM_PORT ?? "", 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
   const settingsDir = process.env.CLAUDE_MEM_DATA_DIR || join(homedir(), ".claude-mem");
   const settingsPath = join(settingsDir, "settings.json");
   if (existsSync(settingsPath)) {
     try {
       const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-      if (typeof settings.CLAUDE_MEM_WORKER_PORT === "number" && Number.isFinite(settings.CLAUDE_MEM_WORKER_PORT)) {
-        return settings.CLAUDE_MEM_WORKER_PORT;
+      // claude-mem writes settings values as strings (e.g. "37701") — accept
+      // both string and numeric shapes so the settings lookup actually works.
+      const raw = settings.CLAUDE_MEM_WORKER_PORT;
+      if (typeof raw === "string" || typeof raw === "number") {
+        const parsed = parseInt(String(raw), 10);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
       }
     } catch { /* ignore parse/read errors */ }
   }
@@ -61,8 +203,7 @@ function discoverWorkerPort(): number {
 const WORKER_PORT = discoverWorkerPort();
 const WORKER_HOST = discoverWorkerHost();
 const PLATFORM_SOURCE = "pi-agent";
-const MAX_TOOL_RESPONSE_LENGTH = 1000;
-const SESSION_COMPLETE_DELAY_MS = 3000;
+const MAX_TOOL_RESPONSE_LENGTH = 50_000;
 const WORKER_FETCH_TIMEOUT_MS = 10_000;
 const MAX_SEARCH_LIMIT = 100;
 
@@ -149,15 +290,56 @@ async function workerGetText(path: string): Promise<string | null> {
 // Project Name Derivation
 //
 // Scopes observations by project. Uses PI_MEM_PROJECT env var if set,
-// otherwise derives from the working directory basename with a "pi-" prefix.
+// otherwise replicates the claude-mem worker's own Er(cwd)/jfe(cwd)
+// derivation: basename of `git rev-parse --show-toplevel` (walked via .git),
+// prefixed with the parent repo for git worktrees ("parent/worktree"),
+// falling back to the cwd basename, then "unknown-project" at the filesystem
+// root.
+//
+// Matching the worker's key matters for cross-engine memory: Claude Code,
+// Cursor, Codex, and OpenClaw sessions for the same repo are stored under
+// the SAME project key, so context injection and memory_recall see them.
+// A "pi-" prefix (the previous behavior) created a separate project with no
+// history and the cross-engine claim never materialized.
 // =============================================================================
 
 function deriveProjectName(cwd: string): string {
 	if (process.env.PI_MEM_PROJECT) {
 		return process.env.PI_MEM_PROJECT;
 	}
-	const dir = basename(cwd);
-	return `pi-${dir}`;
+	const start = cwd.startsWith("~") ? join(homedir(), cwd.slice(1)) : cwd;
+	let dir = start;
+	const ancestors: string[] = [];
+	for (;;) {
+		ancestors.push(dir);
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	for (const ancestor of ancestors) {
+		const gitPath = join(ancestor, ".git");
+		if (!existsSync(gitPath)) continue;
+		let parentName: string | undefined;
+		try {
+			if (statSync(gitPath).isFile()) {
+				// git worktree: .git is a file pointing at <repo>/.git/worktrees/<name>
+				const gitdir = readFileSync(gitPath, "utf8")
+					.split("\n")
+					.map((line) => line.trim())
+					.find((line) => line.startsWith("gitdir:"))
+					?.slice("gitdir:".length)
+					.trim();
+				const marker = "/.git/worktrees/";
+				const at = gitdir ? gitdir.indexOf(marker) : -1;
+				if (at > 0) parentName = basename(gitdir.slice(0, at));
+			}
+		} catch {
+			// treat as a plain repo root
+		}
+		const base = basename(ancestor) || "unknown-project";
+		return parentName ? `${parentName}/${base}` : base;
+	}
+	return basename(start) || "unknown-project";
 }
 
 // =============================================================================
@@ -169,6 +351,30 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	let contentSessionId: string | null = null;
 	let projectName = "pi-agent";
 	let sessionCwd = process.cwd();
+	// Session registry: re-spawning the same task as a new session is common
+	// with parallel session managers — without dedup, one investigation
+	// became 4-5 near-identical sessions (observed: S4169-S4174 for a single
+	// OSU deployment check). The registry reuses the existing session when
+	// the new spawn's first prompt is similar.
+	let registry = loadRegistry();
+	let reusedSession = false;
+	// Summarize ONCE per session, at session end. The worker APPENDS a
+	// session_summaries row per /api/sessions/summarize call and context
+	// injection renders every row as its own session line — summarizing on
+	// every agent_end made a multi-turn session look like N duplicate
+	// sessions (observed: 61-220 summaries per session).
+	let sessionSummarized = false;
+	let lastAssistantText = "";
+
+	function flushSummarize(): Promise<void> {
+		if (!contentSessionId || sessionSummarized) return Promise.resolve();
+		sessionSummarized = true;
+		return workerPost("/api/sessions/summarize", {
+			contentSessionId,
+			last_assistant_message: lastAssistantText,
+			platformSource: PLATFORM_SOURCE,
+		}).then(() => undefined);
+	}
 
 	// Check kill switch
 	if (process.env.PI_MEM_DISABLED === "1") {
@@ -186,10 +392,31 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCwd = ctx.cwd;
 		projectName = deriveProjectName(sessionCwd);
-		contentSessionId = `pi-${projectName}-${Date.now()}`;
+		// Resume continuation: the same OMP session file already records the
+		// claude-mem session id minted by a previous run — reuse it so a
+		// resume continues the SAME session instead of minting a new one
+		// (observed: one resumed OMP session became S725 -> S729 -> S739).
+		// A fresh session has no entry yet, so contentSessionId stays null
+		// and before_agent_start mints as before.
+		const recorded = readRecordedSessionId(ctx.sessionManager?.getSessionFile?.(), projectName);
+		if (recorded) {
+			contentSessionId = recorded;
+			reusedSession = true;
+		} else {
+			contentSessionId = null;
+			reusedSession = false;
+		}
+	});
 
-		// Persist session ID into the session file for compaction recovery
-		pi.appendEntry("pi-mem-session", { contentSessionId, projectName });
+	// Resume continuation for in-process session switches: resuming from
+	// another session must continue the recorded session id too.
+	pi.on("session_switch", async (event, ctx) => {
+		if (event.reason !== "resume") return;
+		const recorded = readRecordedSessionId(ctx.sessionManager?.getSessionFile?.(), projectName);
+		if (recorded) {
+			contentSessionId = recorded;
+			reusedSession = true;
+		}
 	});
 
 	// =========================================================================
@@ -203,12 +430,35 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.on("before_agent_start", async (event) => {
-		if (!contentSessionId) return;
+		const prompt = event.prompt || "pi-agent session";
 
+		// First prompt of the session: reuse an existing session when this
+		// spawn is a re-spawn of the same task (similar first prompt), so a
+		// multi-spawn investigation stays ONE claude-mem session instead of
+		// fragmenting across N near-identical sessions.
+		if (!contentSessionId) {
+			const existing = findReusableSession(registry, projectName, prompt);
+			if (existing) {
+				contentSessionId = existing;
+				reusedSession = true;
+			} else {
+				contentSessionId = `pi-${projectName}-${Date.now()}`;
+				pi.appendEntry("pi-mem-session", { contentSessionId, projectName });
+				const now = Date.now();
+				registry = [
+					...registry.filter((r) => now - r.createdAt < DEDUP_WINDOW_MS * 2).slice(-REGISTRY_MAX),
+					{ contentSessionId, project: projectName, prompt, createdAt: now },
+				];
+				saveRegistry(registry);
+			}
+		}
+
+		// Always init: registers this spawn's prompt for privacy filtering and
+		// (for a reused id) appends the continuation prompt to the session.
 		await workerPost("/api/sessions/init", {
 			contentSessionId,
 			project: projectName,
-			prompt: event.prompt || "pi-agent session",
+			prompt,
 			platformSource: PLATFORM_SOURCE,
 		});
 
@@ -234,9 +484,18 @@ export default function piMemExtension(pi: ExtensionAPI) {
 		if (!contentSessionId) return;
 
 		const projects = encodeURIComponent(projectName);
-		const contextText = await workerGetText(`/api/context/inject?projects=${projects}`);
+		// Session-scoped injection: pass our contentSessionId so the worker
+		// filters observations to this session's thread. Prevents parallel
+		// sessions on the same project from polluting each other's context
+		// (the worker's inject is project-wide by default).
+		const contextText = await workerGetText(`/api/context/inject?projects=${projects}&session=${encodeURIComponent(contentSessionId)}`);
 
-		if (!contextText || contextText.trim().length === 0) return;
+		if (!contextText) return;
+		const trimmed = contextText.trim();
+		// Skip the worker's onboarding hint ("# claude-mem status — this
+		// project has no memory yet") — it is a status message, not memory,
+		// and would be injected into every prompt of a fresh project.
+		if (trimmed.length === 0 || trimmed.startsWith("# claude-mem status")) return;
 
 		// Inject as a user message with XML tags to delineate memory context
 		return {
@@ -302,26 +561,27 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 	// Event: agent_end
 	//
-	// Summarize the session and schedule completion. Uses await for summarize
-	// to ensure the worker processes it before the completion call. Completion
-	// is delayed to let in-flight fire-and-forget observations land.
-	//
-	// Mirrors openclaw/src/index.ts lines 813-845.
+	// Capture the latest assistant message only — the single session summary
+	// is flushed at session_shutdown. The worker APPENDS a session_summaries
+	// row per /api/sessions/summarize call and context injection renders every
+	// row as its own session line, so summarizing per turn made a multi-turn
+	// session show up as dozens of duplicate sessions (observed: 61-220
+	// summaries per session).
 	// =========================================================================
 
-	pi.on("agent_end", async (event) => {
+	pi.on("agent_end", (event) => {
 		if (!contentSessionId) return;
 
-		// Extract last assistant message for summarization
-		let lastAssistantMessage = "";
+		// Keep the latest assistant message for the final summary
+		lastAssistantText = "";
 		if (Array.isArray(event.messages)) {
 			for (let i = event.messages.length - 1; i >= 0; i--) {
 				const msg = event.messages[i];
 				if (msg?.role === "assistant") {
 					if (typeof msg.content === "string") {
-						lastAssistantMessage = msg.content;
+						lastAssistantText = msg.content;
 					} else if (Array.isArray(msg.content)) {
-						lastAssistantMessage = msg.content
+						lastAssistantText = msg.content
 							.filter((block): block is { type: "text"; text: string } => block.type === "text" && "text" in block)
 							.map((block) => block.text)
 							.join("\n");
@@ -330,22 +590,6 @@ export default function piMemExtension(pi: ExtensionAPI) {
 				}
 			}
 		}
-
-		// Await summarize so the worker receives it before complete
-		await workerPost("/api/sessions/summarize", {
-			contentSessionId,
-			last_assistant_message: lastAssistantMessage,
-			platformSource: PLATFORM_SOURCE,
-		});
-
-		// Delay completion to let in-flight observations arrive
-		const sid = contentSessionId;
-		setTimeout(() => {
-			workerPostFireAndForget("/api/sessions/complete", {
-				contentSessionId: sid,
-				platformSource: PLATFORM_SOURCE,
-			});
-		}, SESSION_COMPLETE_DELAY_MS);
 	});
 
 	// =========================================================================
@@ -370,6 +614,13 @@ export default function piMemExtension(pi: ExtensionAPI) {
 	// =========================================================================
 
 	pi.on("session_shutdown", () => {
+		// Flush the session's single summary before teardown. Reused spawns
+		// skip: the original spawn (or another one) already summarizes the
+		// shared session — summarizing again would re-create the duplicate
+		// summary rows this fix removes.
+		if (!reusedSession) {
+			void flushSummarize();
+		}
 		contentSessionId = null;
 	});
 

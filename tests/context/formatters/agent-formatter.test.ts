@@ -1,11 +1,25 @@
-import { describe, it, expect, mock, beforeEach } from 'bun:test';
+import { describe, it, expect, mock, beforeEach, afterAll } from 'bun:test';
 
-// Mock the ModeManager before importing the formatter
+// Capture real exports before mock.module mutates the live namespace, then
+// re-register the snapshot in afterAll so the partial ModeManager stub (no
+// class prototype, no loadMode) does not leak into later test files (bun's
+// mock.module is process-global; mock.restore() does NOT undo it). A leaked
+// stub breaks tests/server/server-boot.test.ts, server-runtime-smoke and the
+// tests/sdk parser suites whenever the readdir-dependent file order runs them
+// after this file.
+import * as realModeManagerModule from '../../../src/services/domain/ModeManager.js';
+
+const realModeManagerSnapshot = { ...realModeManagerModule };
+
+afterAll(() => {
+  mock.module('../../../src/services/domain/ModeManager.js', () => realModeManagerSnapshot);
+});
+
 mock.module('../../../src/services/domain/ModeManager.js', () => ({
   ModeManager: {
     getInstance: () => ({
       getActiveMode: () => ({
-        name: 'code',
+        name: 'Code Development',
         prompts: {},
         observation_types: [
           { id: 'decision', emoji: 'D' },
@@ -14,6 +28,7 @@ mock.module('../../../src/services/domain/ModeManager.js', () => ({
         ],
         observation_concepts: [],
       }),
+      getActiveModeId: () => 'code',
       getTypeIcon: (type: string) => {
         const icons: Record<string, string> = {
           decision: 'D',
@@ -30,11 +45,8 @@ mock.module('../../../src/services/domain/ModeManager.js', () => ({
 import {
   renderAgentHeader,
   renderAgentLegend,
-  renderAgentColumnKey,
-  renderAgentContextIndex,
   renderAgentContextEconomics,
   renderAgentDayHeader,
-  renderAgentFileHeader,
   renderAgentTableRow,
   renderAgentFullObservation,
   renderAgentSummaryItem,
@@ -46,7 +58,6 @@ import {
 
 import type { Observation, TokenEconomics, ContextConfig, PriorMessages } from '../../../src/services/context/types.js';
 
-// Helper to create a minimal observation
 function createTestObservation(overrides: Partial<Observation> = {}): Observation {
   return {
     id: 1,
@@ -66,7 +77,6 @@ function createTestObservation(overrides: Partial<Observation> = {}): Observatio
   };
 }
 
-// Helper to create token economics
 function createTestEconomics(overrides: Partial<TokenEconomics> = {}): TokenEconomics {
   return {
     totalObservations: 10,
@@ -78,7 +88,6 @@ function createTestEconomics(overrides: Partial<TokenEconomics> = {}): TokenEcon
   };
 }
 
-// Helper to create context config
 function createTestConfig(overrides: Partial<ContextConfig> = {}): ContextConfig {
   return {
     totalObservationCount: 50,
@@ -102,9 +111,10 @@ describe('AgentFormatter', () => {
     it('should produce valid markdown header with project name', () => {
       const result = renderAgentHeader('my-project');
 
-      expect(result).toHaveLength(2);
-      expect(result[0]).toMatch(/^# \$CMEM my-project \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}[ap]m [A-Z]{3,4}$/);
-      expect(result[1]).toBe('');
+      expect(result).toHaveLength(3);
+      expect(result[0]).toMatch(/^# \[my-project\] recent context, \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}[ap]m [A-Z]{3,4}$/);
+      expect(result[1]).toBe('Mode: Code Development (code)');
+      expect(result[2]).toBe('');
     });
 
     it('should handle special characters in project name', () => {
@@ -116,7 +126,7 @@ describe('AgentFormatter', () => {
     it('should handle empty project name', () => {
       const result = renderAgentHeader('');
 
-      expect(result[0]).toMatch(/^# \$CMEM  \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}[ap]m [A-Z]{3,4}$/);
+      expect(result[0]).toMatch(/^# \[\] recent context, \d{4}-\d{2}-\d{2} \d{1,2}:\d{2}[ap]m [A-Z]{3,4}$/);
     });
   });
 
@@ -133,22 +143,6 @@ describe('AgentFormatter', () => {
       const result = renderAgentLegend();
 
       expect(result[0]).toContain('session');
-    });
-  });
-
-  describe('renderAgentColumnKey', () => {
-    it('should return empty array in compact format', () => {
-      const result = renderAgentColumnKey();
-
-      expect(result).toHaveLength(0);
-    });
-  });
-
-  describe('renderAgentContextIndex', () => {
-    it('should return empty array in compact format', () => {
-      const result = renderAgentContextIndex();
-
-      expect(result).toHaveLength(0);
     });
   });
 
@@ -223,14 +217,6 @@ describe('AgentFormatter', () => {
     });
   });
 
-  describe('renderAgentFileHeader', () => {
-    it('should return empty array in compact format', () => {
-      const result = renderAgentFileHeader('src/index.ts');
-
-      expect(result).toHaveLength(0);
-    });
-  });
-
   describe('renderAgentTableRow', () => {
     it('should include observation ID', () => {
       const obs = createTestObservation({ id: 42 });
@@ -281,7 +267,6 @@ describe('AgentFormatter', () => {
       const obs = createTestObservation();
       const config = createTestConfig();
 
-      // Empty string timeDisplay means "same as previous"
       const result = renderAgentTableRow(obs, '', config);
 
       expect(result).toContain('"');
@@ -316,7 +301,6 @@ describe('AgentFormatter', () => {
 
       const result = renderAgentFullObservation(obs, '10:00 AM', null, config);
 
-      // Should not have an extra content block
       expect(result.length).toBeLessThan(5);
     });
 
@@ -327,7 +311,6 @@ describe('AgentFormatter', () => {
       const result = renderAgentFullObservation(obs, '10:00 AM', null, config);
       const joined = result.join('\n');
 
-      // Compact format: "~{readTokens}t" and "W {discoveryTokens}"
       expect(joined).toContain('~');
       expect(joined).toContain('t');
       expect(joined).toContain('W 250');
@@ -381,7 +364,6 @@ describe('AgentFormatter', () => {
     it('should return empty array when value is empty string', () => {
       const result = renderAgentSummaryField('Learned', '');
 
-      // Empty string is falsy, so should return empty array
       expect(result).toHaveLength(0);
     });
   });
@@ -389,7 +371,6 @@ describe('AgentFormatter', () => {
   describe('renderAgentPreviouslySection', () => {
     it('should render section when assistantMessage exists', () => {
       const priorMessages: PriorMessages = {
-        userMessage: '',
         assistantMessage: 'I completed the task successfully.',
       };
 
@@ -402,7 +383,6 @@ describe('AgentFormatter', () => {
 
     it('should return empty when assistantMessage is empty', () => {
       const priorMessages: PriorMessages = {
-        userMessage: '',
         assistantMessage: '',
       };
 
@@ -413,7 +393,6 @@ describe('AgentFormatter', () => {
 
     it('should include separator', () => {
       const priorMessages: PriorMessages = {
-        userMessage: '',
         assistantMessage: 'Some message',
       };
 
@@ -443,7 +422,6 @@ describe('AgentFormatter', () => {
       const result = renderAgentFooter(15500, 100);
       const joined = result.join('\n');
 
-      // 15500 / 1000 = 15.5 -> rounds to 16
       expect(joined).toContain('16k');
     });
   });
@@ -452,21 +430,21 @@ describe('AgentFormatter', () => {
     it('should return helpful message with project name', () => {
       const result = renderAgentEmptyState('my-project');
 
-      expect(result).toContain('# $CMEM my-project');
+      expect(result).toContain('# [my-project] recent context,');
+      expect(result).toContain('Mode: Code Development (code)');
       expect(result).toContain('No previous sessions found.');
     });
 
     it('should be valid markdown', () => {
       const result = renderAgentEmptyState('test');
 
-      // Should start with h1
       expect(result.startsWith('#')).toBe(true);
     });
 
     it('should handle empty project name', () => {
       const result = renderAgentEmptyState('');
 
-      expect(result).toContain('# $CMEM ');
+      expect(result).toContain('# [] recent context,');
     });
   });
 });

@@ -1,8 +1,3 @@
-/**
- * HumanFormatter - Formats context output with ANSI colors for terminal
- *
- * Handles all colored formatting for context injection (terminal display).
- */
 
 import type {
   ContextConfig,
@@ -14,12 +9,9 @@ import { colors } from '../types.js';
 import { ModeManager } from '../../domain/ModeManager.js';
 import { formatObservationTokenDisplay } from '../TokenCalculator.js';
 
-/**
- * Format current date/time for header display
- */
 function formatHeaderDateTime(): string {
   const now = new Date();
-  const date = now.toLocaleDateString('en-CA'); // YYYY-MM-DD format
+  const date = now.toLocaleDateString('en-CA'); 
   const time = now.toLocaleTimeString('en-US', {
     hour: 'numeric',
     minute: '2-digit',
@@ -29,21 +21,22 @@ function formatHeaderDateTime(): string {
   return `${date} ${time} ${tz}`;
 }
 
-/**
- * Render human-readable header
- */
+function formatActiveMode(): string {
+  const manager = ModeManager.getInstance();
+  const mode = manager.getActiveMode();
+  return `${mode.name} (${manager.getActiveModeId()})`;
+}
+
 export function renderHumanHeader(project: string): string[] {
   return [
     '',
     `${colors.bright}${colors.cyan}[${project}] recent context, ${formatHeaderDateTime()}${colors.reset}`,
+    `${colors.dim}Mode: ${formatActiveMode()}${colors.reset}`,
     `${colors.gray}${'─'.repeat(60)}${colors.reset}`,
     ''
   ];
 }
 
-/**
- * Render human-readable legend
- */
 export function renderHumanLegend(): string[] {
   const mode = ModeManager.getInstance().getActiveMode();
   const typeLegendItems = mode.observation_types.map(t => `${t.emoji} ${t.id}`).join(' | ');
@@ -54,9 +47,6 @@ export function renderHumanLegend(): string[] {
   ];
 }
 
-/**
- * Render human-readable column key
- */
 export function renderHumanColumnKey(): string[] {
   return [
     `${colors.bright}Column Key${colors.reset}`,
@@ -66,9 +56,6 @@ export function renderHumanColumnKey(): string[] {
   ];
 }
 
-/**
- * Render human-readable context index instructions
- */
 export function renderHumanContextIndex(): string[] {
   return [
     `${colors.dim}Context Index: This semantic index (titles, types, files, tokens) is usually sufficient to understand past work.${colors.reset}`,
@@ -81,9 +68,6 @@ export function renderHumanContextIndex(): string[] {
   ];
 }
 
-/**
- * Render human-readable context economics
- */
 export function renderHumanContextEconomics(
   economics: TokenEconomics,
   config: ContextConfig
@@ -110,9 +94,6 @@ export function renderHumanContextEconomics(
   return output;
 }
 
-/**
- * Render human-readable day header
- */
 export function renderHumanDayHeader(day: string): string[] {
   return [
     `${colors.bright}${colors.cyan}${day}${colors.reset}`,
@@ -120,18 +101,12 @@ export function renderHumanDayHeader(day: string): string[] {
   ];
 }
 
-/**
- * Render human-readable file header
- */
 export function renderHumanFileHeader(file: string): string[] {
   return [
     `${colors.dim}${file}${colors.reset}`
   ];
 }
 
-/**
- * Render human-readable table row for observation
- */
 export function renderHumanTableRow(
   obs: Observation,
   time: string,
@@ -149,9 +124,6 @@ export function renderHumanTableRow(
   return `  ${colors.dim}#${obs.id}${colors.reset}  ${timePart}  ${icon}  ${title} ${readPart} ${discoveryPart}`;
 }
 
-/**
- * Render human-readable full observation
- */
 export function renderHumanFullObservation(
   obs: Observation,
   time: string,
@@ -180,9 +152,6 @@ export function renderHumanFullObservation(
   return output;
 }
 
-/**
- * Render human-readable summary item in timeline
- */
 export function renderHumanSummaryItem(
   summary: { id: number; request: string | null },
   formattedTime: string
@@ -194,17 +163,11 @@ export function renderHumanSummaryItem(
   ];
 }
 
-/**
- * Render human-readable summary field
- */
 export function renderHumanSummaryField(label: string, value: string | null, color: string): string[] {
   if (!value) return [];
   return [`${color}${label}:${colors.reset} ${value}`, ''];
 }
 
-/**
- * Render human-readable previously section
- */
 export function renderHumanPreviouslySection(priorMessages: PriorMessages): string[] {
   if (!priorMessages.assistantMessage) return [];
 
@@ -219,9 +182,6 @@ export function renderHumanPreviouslySection(priorMessages: PriorMessages): stri
   ];
 }
 
-/**
- * Render human-readable footer
- */
 export function renderHumanFooter(totalDiscoveryTokens: number, totalReadTokens: number): string[] {
   const workTokensK = Math.round(totalDiscoveryTokens / 1000);
   return [
@@ -230,9 +190,6 @@ export function renderHumanFooter(totalDiscoveryTokens: number, totalReadTokens:
   ];
 }
 
-/**
- * Render human-readable empty state
- */
 export function renderHumanEmptyState(project: string): string {
-  return `\n${colors.bright}${colors.cyan}[${project}] recent context, ${formatHeaderDateTime()}${colors.reset}\n${colors.gray}${'─'.repeat(60)}${colors.reset}\n\n${colors.dim}No previous sessions found for this project yet.${colors.reset}\n`;
+  return `\n${colors.bright}${colors.cyan}[${project}] recent context, ${formatHeaderDateTime()}${colors.reset}\n${colors.dim}Mode: ${formatActiveMode()}${colors.reset}\n${colors.gray}${'─'.repeat(60)}${colors.reset}\n\n${colors.dim}No previous sessions found for this project yet.${colors.reset}\n`;
 }

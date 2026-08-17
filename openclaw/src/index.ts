@@ -1,9 +1,4 @@
-// No file-system imports needed — context is injected via system prompt hook,
-// not by writing to MEMORY.md.
 
-// Minimal type declarations for the OpenClaw Plugin SDK.
-// These match the real OpenClawPluginApi provided by the gateway at runtime.
-// See: https://docs.openclaw.ai/plugin
 
 interface PluginLogger {
   debug?: (message: string) => void;
@@ -30,7 +25,6 @@ interface PluginCommandContext {
 
 type PluginCommandResult = string | { text: string } | { text: string; format?: string };
 
-// OpenClaw event types for agent lifecycle
 interface BeforeAgentStartEvent {
   prompt?: string;
 }
@@ -136,10 +130,6 @@ interface OpenClawPluginApi {
   };
 }
 
-// ============================================================================
-// SSE Observation Feed Types
-// ============================================================================
-
 interface ObservationSSEPayload {
   id: number;
   memory_session_id: string;
@@ -166,9 +156,10 @@ interface SSENewObservationEvent {
 
 type ConnectionState = "disconnected" | "connected" | "reconnecting";
 
-// ============================================================================
-// Plugin Configuration
-// ============================================================================
+const DETAILED_FEED_TYPES = new Set(["security_alert", "security_note", "sensitive", "bugfix", "decision"]);
+const COMPACT_FEED_MAX_CHARS = 900;
+const DETAILED_FEED_MAX_CHARS = 2200;
+const DETAILED_FACT_LIMIT = 5;
 
 interface FeedEmojiConfig {
   primary?: string;
@@ -193,16 +184,10 @@ interface ClaudeMemPluginConfig {
   };
 }
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-const MAX_SSE_BUFFER_SIZE = 1024 * 1024; // 1MB
+const MAX_SSE_BUFFER_SIZE = 1024 * 1024; 
 const DEFAULT_WORKER_PORT = 37777;
 const DEFAULT_WORKER_HOST = "127.0.0.1";
 
-// Emoji pool for deterministic auto-assignment to unknown agents.
-// Uses a hash of the agentId to pick a consistent emoji — no persistent state needed.
 const EMOJI_POOL = [
   "🔧","📐","🔍","💻","🧪","🐛","🛡️","☁️","📦","🎯",
   "🔮","⚡","🌊","🎨","📊","🚀","🔬","🏗️","📝","🎭",
@@ -216,7 +201,6 @@ function poolEmojiForAgent(agentId: string): string {
   return EMOJI_POOL[Math.abs(hash) % EMOJI_POOL.length];
 }
 
-// Default emoji values — overridden by user config via observationFeed.emojis
 const DEFAULT_PRIMARY_EMOJI = "🦞";
 const DEFAULT_CLAUDE_CODE_EMOJI = "⌨️";
 const DEFAULT_CLAUDE_CODE_LABEL = "Claude Code Session";
@@ -233,19 +217,15 @@ function buildGetSourceLabel(
 
   return function getSourceLabel(project: string | null | undefined): string {
     if (!project) return fallback;
-    // OpenClaw agent projects are formatted as "openclaw-<agentId>"
     if (project.startsWith("openclaw-")) {
       const agentId = project.slice("openclaw-".length);
       if (!agentId) return `${primary} openclaw`;
       const emoji = pinnedAgents[agentId] || poolEmojiForAgent(agentId);
       return `${emoji} ${agentId}`;
     }
-    // OpenClaw project without agent suffix
     if (project === "openclaw") {
       return `${primary} openclaw`;
     }
-    // Everything else is a Claude Code session. Keep the project identifier
-    // visible so concurrent sessions can be distinguished in the feed.
     const trimmedLabel = claudeCodeLabel.trim();
     if (!trimmedLabel) {
       return `${claudeCode} ${project}`;
@@ -254,14 +234,68 @@ function buildGetSourceLabel(
   };
 }
 
-// ============================================================================
-// Worker HTTP Client
-// ============================================================================
-
 let _workerHost = DEFAULT_WORKER_HOST;
 
 function workerBaseUrl(port: number): string {
   return `http://${_workerHost}:${port}`;
+}
+
+const CIRCUIT_BREAKER_THRESHOLD = 3;
+const CIRCUIT_BREAKER_COOLDOWN_MS = 30_000;
+
+type CircuitState = "CLOSED" | "OPEN" | "HALF_OPEN";
+
+let _circuitState: CircuitState = "CLOSED";
+let _circuitFailures = 0;
+let _circuitOpenedAt = 0;
+let _halfOpenProbeInFlight = false;
+
+function circuitAllow(logger: PluginLogger): boolean {
+  if (_circuitState === "CLOSED") return true;
+  if (_circuitState === "OPEN") {
+    if (Date.now() - _circuitOpenedAt >= CIRCUIT_BREAKER_COOLDOWN_MS) {
+      _circuitState = "HALF_OPEN";
+      logger.info("[claude-mem] Circuit breaker: probing worker connection");
+      if (_halfOpenProbeInFlight) return false;
+      _halfOpenProbeInFlight = true;
+      return true;
+    }
+    return false;
+  }
+  if (_halfOpenProbeInFlight) return false;
+  _halfOpenProbeInFlight = true;
+  return true;
+}
+
+function circuitOnSuccess(logger: PluginLogger): void {
+  if (_circuitState !== "CLOSED") {
+    logger.info("[claude-mem] Worker connection restored — circuit closed");
+  }
+  _circuitState = "CLOSED";
+  _circuitFailures = 0;
+  _halfOpenProbeInFlight = false;
+}
+
+function circuitOnFailure(logger: PluginLogger): void {
+  _halfOpenProbeInFlight = false;
+  _circuitFailures++;
+  if (
+    _circuitState === "HALF_OPEN" ||
+    (_circuitState === "CLOSED" && _circuitFailures >= CIRCUIT_BREAKER_THRESHOLD)
+  ) {
+    _circuitState = "OPEN";
+    _circuitOpenedAt = Date.now();
+    logger.warn(
+      `[claude-mem] Worker unreachable — disabling requests for ${CIRCUIT_BREAKER_COOLDOWN_MS / 1000}s`
+    );
+  }
+}
+
+function circuitReset(): void {
+  _circuitState = "CLOSED";
+  _circuitFailures = 0;
+  _circuitOpenedAt = 0;
+  _halfOpenProbeInFlight = false;
 }
 
 async function workerPost(
@@ -270,6 +304,7 @@ async function workerPost(
   body: Record<string, unknown>,
   logger: PluginLogger
 ): Promise<Record<string, unknown> | null> {
+  if (!circuitAllow(logger)) return null;
   try {
     const response = await fetch(`${workerBaseUrl(port)}${path}`, {
       method: "POST",
@@ -277,13 +312,18 @@ async function workerPost(
       body: JSON.stringify(body),
     });
     if (!response.ok) {
+      circuitOnFailure(logger);
       logger.warn(`[claude-mem] Worker POST ${path} returned ${response.status}`);
       return null;
     }
+    circuitOnSuccess(logger);
     return (await response.json()) as Record<string, unknown>;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.warn(`[claude-mem] Worker POST ${path} failed: ${message}`);
+    circuitOnFailure(logger);
+    if (_circuitState !== "OPEN") {
+      logger.warn(`[claude-mem] Worker POST ${path} failed: ${message}`);
+    }
     return null;
   }
 }
@@ -294,13 +334,24 @@ function workerPostFireAndForget(
   body: Record<string, unknown>,
   logger: PluginLogger
 ): void {
+  if (!circuitAllow(logger)) return;
   fetch(`${workerBaseUrl(port)}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  }).then((response) => {
+    if (!response.ok) {
+      circuitOnFailure(logger);
+      logger.warn(`[claude-mem] Worker POST ${path} returned ${response.status}`);
+      return;
+    }
+    circuitOnSuccess(logger);
   }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
-    logger.warn(`[claude-mem] Worker POST ${path} failed: ${message}`);
+    circuitOnFailure(logger);
+    if (_circuitState !== "OPEN") {
+      logger.warn(`[claude-mem] Worker POST ${path} failed: ${message}`);
+    }
   });
 }
 
@@ -309,16 +360,22 @@ async function workerGetText(
   path: string,
   logger: PluginLogger
 ): Promise<string | null> {
+  if (!circuitAllow(logger)) return null;
   try {
     const response = await fetch(`${workerBaseUrl(port)}${path}`);
     if (!response.ok) {
+      circuitOnFailure(logger);
       logger.warn(`[claude-mem] Worker GET ${path} returned ${response.status}`);
       return null;
     }
+    circuitOnSuccess(logger);
     return await response.text();
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.warn(`[claude-mem] Worker GET ${path} failed: ${message}`);
+    circuitOnFailure(logger);
+    if (_circuitState !== "OPEN") {
+      logger.warn(`[claude-mem] Worker GET ${path} failed: ${message}`);
+    }
     return null;
   }
 }
@@ -339,25 +396,58 @@ async function workerGetJson(
   }
 }
 
-// ============================================================================
-// SSE Observation Feed
-// ============================================================================
-
 function formatObservationMessage(
   observation: ObservationSSEPayload,
   getSourceLabel: (project: string | null | undefined) => string,
 ): string {
   const title = observation.title || "Untitled";
   const source = getSourceLabel(observation.project);
-  let message = `${source}\n**${title}**`;
+  const isDetailed = DETAILED_FEED_TYPES.has(observation.type);
+  const parts = [`${source}\n**${title}**`];
   if (observation.subtitle) {
-    message += `\n${observation.subtitle}`;
+    parts.push(truncateText(observation.subtitle, isDetailed ? 500 : 260));
   }
-  return message;
+
+  if (!isDetailed) {
+    return truncateText(parts.join("\n"), COMPACT_FEED_MAX_CHARS);
+  }
+
+  if (observation.narrative) {
+    parts.push(`Narrative\n${truncateText(observation.narrative, 900)}`);
+  }
+
+  const facts = parseStringArray(observation.facts).slice(0, DETAILED_FACT_LIMIT);
+  if (facts.length > 0) {
+    parts.push(`Facts\n${facts.map((fact) => `- ${truncateText(fact, 320)}`).join("\n")}`);
+  }
+
+  const concepts = parseStringArray(observation.concepts).slice(0, 8);
+  if (concepts.length > 0) {
+    parts.push(`Concepts: ${concepts.join(", ")}`);
+  }
+
+  return truncateText(parts.join("\n\n"), DETAILED_FEED_MAX_CHARS);
 }
 
-// Explicit mapping from channel name to [runtime namespace key, send function name].
-// These match the PluginRuntime.channel structure in the OpenClaw SDK.
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const hardLimit = Math.max(0, maxChars - 3);
+  const truncated = value.slice(0, hardLimit);
+  const lastWhitespace = truncated.search(/\s+\S*$/);
+  const boundary = lastWhitespace > Math.floor(hardLimit * 0.65) ? lastWhitespace : hardLimit;
+  return `${truncated.slice(0, boundary).trimEnd()}...`;
+}
+
+function parseStringArray(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 const CHANNEL_SEND_MAP: Record<string, { namespace: string; functionName: string }> = {
   telegram: { namespace: "telegram", functionName: "sendMessageTelegram" },
   whatsapp: { namespace: "whatsapp", functionName: "sendMessageWhatsApp" },
@@ -401,7 +491,6 @@ function sendToChannel(
   text: string,
   botToken?: string
 ): Promise<void> {
-  // If a dedicated bot token is provided for Telegram, send directly
   if (botToken && channel === "telegram") {
     return sendDirectTelegram(botToken, to, text, api.logger);
   }
@@ -424,7 +513,6 @@ function sendToChannel(
     return Promise.resolve();
   }
 
-  // WhatsApp requires a third options argument with { verbose: boolean }
   const args: unknown[] = channel === "whatsapp"
     ? [to, text, { verbose: false }]
     : [to, text];
@@ -489,7 +577,6 @@ async function connectToSSEStream(
         buffer = frames.pop() || "";
 
         for (const frame of frames) {
-          // SSE spec: concatenate all data: lines with \n
           const dataLines = frame
             .split("\n")
             .filter((line) => line.startsWith("data:"))
@@ -530,10 +617,6 @@ async function connectToSSEStream(
   setConnectionState("disconnected");
 }
 
-// ============================================================================
-// Plugin Entry Point
-// ============================================================================
-
 export default function claudeMemPlugin(api: OpenClawPluginApi): void {
   const userConfig = (api.pluginConfig || {}) as ClaudeMemPluginConfig;
   const workerPort = userConfig.workerPort || DEFAULT_WORKER_PORT;
@@ -548,19 +631,11 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     return baseProjectName;
   }
 
-  // ------------------------------------------------------------------
-  // Session tracking for observation I/O
-  // ------------------------------------------------------------------
   const sessionIds = new Map<string, string>();
   const canonicalSessionKeys = new Map<string, string>();
   const sessionAliasesByCanonicalKey = new Map<string, Set<string>>();
-  const pendingCompletionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const recentPromptInits = new Map<string, number>();
-  const completionDelayMs = (() => {
-    const val = Number((userConfig as Record<string, unknown>).completionDelayMs);
-    return Number.isFinite(val) ? Math.max(0, val) : 5000;
-  })();
-  const syncMemoryFile = userConfig.syncMemoryFile !== false; // default true
+  const syncMemoryFile = userConfig.syncMemoryFile !== false; 
   const syncMemoryFileExclude = new Set(userConfig.syncMemoryFileExclude || []);
 
   function getContentSessionId(sessionKey?: string): string {
@@ -622,9 +697,6 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     }
     const cacheKey = `${contentSessionId}::${project}::${prompt}`;
     const lastSeenAt = recentPromptInits.get(cacheKey);
-    // Note: cache is set unconditionally before return. If workerPost fails
-    // after this check, a retry within 2s would be incorrectly skipped.
-    // Acceptable because before_agent_start is not retried by the runtime.
     recentPromptInits.set(cacheKey, now);
     return typeof lastSeenAt === "number" && now - lastSeenAt <= 2000;
   }
@@ -643,26 +715,10 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     sessionIds.delete(canonicalKey);
   }
 
-  function scheduleSessionComplete(contentSessionId: string): void {
-    const existingTimer = pendingCompletionTimers.get(contentSessionId);
-    if (existingTimer) clearTimeout(existingTimer);
-    const timer = setTimeout(() => {
-      pendingCompletionTimers.delete(contentSessionId);
-      workerPostFireAndForget(workerPort, "/api/sessions/complete", {
-        contentSessionId,
-      }, api.logger);
-    }, completionDelayMs);
-    pendingCompletionTimers.set(contentSessionId, timer);
-  }
-
-  // TTL cache for context injection to avoid re-fetching on every LLM turn.
-  // before_prompt_build fires on every turn; caching for 60s keeps the worker
-  // load manageable while still picking up new observations reasonably quickly.
   const CONTEXT_CACHE_TTL_MS = 60_000;
   const contextCache = new Map<string, { text: string; fetchedAt: number }>();
 
   async function getContextForPrompt(ctx?: EventContext): Promise<string | null> {
-    // Include both the base project and agent-scoped project (e.g. "openclaw" + "openclaw-main")
     const projects = [baseProjectName];
     const agentProject = ctx ? getProjectName(ctx) : null;
     if (agentProject && agentProject !== baseProjectName) {
@@ -670,7 +726,6 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     }
     const cacheKey = projects.join(",");
 
-    // Return cached context if still fresh
     const cached = contextCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < CONTEXT_CACHE_TTL_MS) {
       return cached.text;
@@ -689,65 +744,46 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     return null;
   }
 
-  // ------------------------------------------------------------------
-  // Event: session_start — track session (fires on /new, /reset)
-  // Init is deferred to before_agent_start to avoid duplicate prompt records.
-  // ------------------------------------------------------------------
-  api.on("session_start", async (_event, ctx) => {
-    const { contentSessionId } = rememberSessionContext(ctx);
-    api.logger.info(`[claude-mem] Session tracking initialized: ${contentSessionId}`);
-  });
-
-  // ------------------------------------------------------------------
-  // Event: message_received — alias tracking only; init deferred to before_agent_start
-  // ------------------------------------------------------------------
-  api.on("message_received", async (event, ctx) => {
-    const { canonicalKey, contentSessionId } = rememberSessionContext(ctx);
-    api.logger.info(`[claude-mem] Message received — prompt capture deferred to before_agent_start: session=${canonicalKey} contentSessionId=${contentSessionId} hasContent=${Boolean(event.content)}`);
-  });
-
-  // ------------------------------------------------------------------
-  // Event: after_compaction — preserve session tracking after context compaction.
-  // Re-init is intentionally NOT called here; the worker retains session state
-  // independently and re-initializing would create duplicate prompt records.
-  // ------------------------------------------------------------------
-  api.on("after_compaction", async (_event, ctx) => {
-    const { contentSessionId } = rememberSessionContext(ctx);
-    api.logger.info(`[claude-mem] Session preserved after compaction: ${contentSessionId}`);
-  });
-
-  // ------------------------------------------------------------------
-  // Event: before_agent_start — single init point with dedup guard
-  // ------------------------------------------------------------------
-  api.on("before_agent_start", async (event, ctx) => {
+  // Centralized session-init POST. session_start, after_compaction, and
+  // before_agent_start each call this; the 2s dedup guard
+  // (shouldSkipDuplicatePromptInit) collapses the redundant inits a single
+  // user-message flow produces into one prompt record, while still ensuring a
+  // session is initialized even on flows that never reach before_agent_start.
+  async function initSessionOnce(ctx: EventContext, promptText: string, via: string): Promise<void> {
     const { contentSessionId } = rememberSessionContext(ctx);
     const projectName = getProjectName(ctx);
-    const promptText = event.prompt || "agent run";
 
     if (shouldSkipDuplicatePromptInit(contentSessionId, projectName, promptText)) {
-      api.logger.info(`[claude-mem] Skipping duplicate prompt init: contentSessionId=${contentSessionId} project=${projectName}`);
+      api.logger.info(`[claude-mem] Skipping duplicate prompt init: contentSessionId=${contentSessionId} project=${projectName} via=${via}`);
       return;
     }
 
-    // Initialize session in the worker so observations are not skipped
-    // (the privacy check requires a stored user prompt to exist)
     await workerPost(workerPort, "/api/sessions/init", {
       contentSessionId,
       project: projectName,
       prompt: promptText,
     }, api.logger);
 
-    api.logger.info(`[claude-mem] Session initialized via before_agent_start: contentSessionId=${contentSessionId} project=${projectName}`);
+    api.logger.info(`[claude-mem] Session initialized via ${via}: contentSessionId=${contentSessionId} project=${projectName}`);
+  }
+
+  api.on("session_start", async (_event, ctx) => {
+    await initSessionOnce(ctx, "session start", "session_start");
   });
 
-  // ------------------------------------------------------------------
-  // Event: before_prompt_build — inject context into system prompt
-  //
-  // Instead of writing to MEMORY.md (which conflicts with agent-curated
-  // memory), inject the observation timeline via appendSystemContext.
-  // This keeps MEMORY.md under the agent's control while still providing
-  // cross-session context to the LLM.
-  // ------------------------------------------------------------------
+  api.on("message_received", async (event, ctx) => {
+    const { canonicalKey, contentSessionId } = rememberSessionContext(ctx);
+    api.logger.info(`[claude-mem] Message received — prompt capture deferred to before_agent_start: session=${canonicalKey} contentSessionId=${contentSessionId} hasContent=${Boolean(event.content)}`);
+  });
+
+  api.on("after_compaction", async (_event, ctx) => {
+    await initSessionOnce(ctx, "after compaction", "after_compaction");
+  });
+
+  api.on("before_agent_start", async (event, ctx) => {
+    await initSessionOnce(ctx, event.prompt || "agent run", "before_agent_start");
+  });
+
   api.on("before_prompt_build", async (_event, ctx) => {
     if (!shouldInjectContext(ctx)) return;
 
@@ -758,20 +794,15 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     }
   });
 
-  // ------------------------------------------------------------------
-  // Event: tool_result_persist — record tool observations
-  // ------------------------------------------------------------------
   api.on("tool_result_persist", (event, ctx) => {
     api.logger.info(`[claude-mem] tool_result_persist fired: tool=${event.toolName ?? "unknown"} agent=${ctx.agentId ?? "none"} session=${ctx.sessionKey ?? "none"}`);
     const toolName = event.toolName;
     if (!toolName) return;
 
-    // Skip memory_ tools to prevent recursive observation loops
     if (toolName.startsWith("memory_")) return;
 
     const { canonicalKey, contentSessionId } = rememberSessionContext(ctx);
 
-    // Extract result text from all content blocks
     let toolResponseText = "";
     const content = event.message?.content;
     if (Array.isArray(content)) {
@@ -781,23 +812,18 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
         .join("\n");
     }
 
-    // Truncate long responses to prevent oversized payloads
     const MAX_TOOL_RESPONSE_LENGTH = 1000;
     if (toolResponseText.length > MAX_TOOL_RESPONSE_LENGTH) {
       toolResponseText = toolResponseText.slice(0, MAX_TOOL_RESPONSE_LENGTH);
     }
 
-    // Resolve workspaceDir with fallback chain.
-    // Empty cwd causes worker-side observation queueing failures,
-    // so we drop the observation rather than sending cwd: "".
-    const workspaceDir = ctx.workspaceDir;
-
-    if (!workspaceDir) {
-      api.logger.warn(`[claude-mem] Skipping observation persist because workspaceDir is unavailable: session=${canonicalKey} tool=${toolName}`);
-      return;
+    // Fall back to the process cwd when the event carries no workspaceDir, so a
+    // missing ctx field never silently drops a captured observation.
+    const workspaceDir = ctx.workspaceDir || process.cwd();
+    if (!ctx.workspaceDir) {
+      api.logger.info(`[claude-mem] tool_result_persist missing workspaceDir; using process.cwd(): session=${canonicalKey} tool=${toolName}`);
     }
 
-    // Fire-and-forget: send observation to worker
     workerPostFireAndForget(workerPort, "/api/sessions/observations", {
       contentSessionId,
       tool_name: toolName,
@@ -807,13 +833,9 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     }, api.logger);
   });
 
-  // ------------------------------------------------------------------
-  // Event: agent_end — summarize and complete session
-  // ------------------------------------------------------------------
   api.on("agent_end", async (event, ctx) => {
     const { contentSessionId } = rememberSessionContext(ctx);
 
-    // Extract last assistant message for summarization
     let lastAssistantMessage = "";
     if (Array.isArray(event.messages)) {
       for (let i = event.messages.length - 1; i >= 0; i--) {
@@ -832,45 +854,27 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
       }
     }
 
-    // Await summarize so the worker receives it before complete.
-    // This also gives in-flight tool_result_persist observations time to arrive
-    // (they use fire-and-forget and may still be in transit).
     await workerPost(workerPort, "/api/sessions/summarize", {
       contentSessionId,
       last_assistant_message: lastAssistantMessage,
     }, api.logger);
-
-    api.logger.info(`[claude-mem] Scheduling session complete in ${completionDelayMs}ms: ${contentSessionId}`);
-    scheduleSessionComplete(contentSessionId);
   });
 
-  // ------------------------------------------------------------------
-  // Event: session_end — clean up session tracking to prevent unbounded growth
-  // ------------------------------------------------------------------
   api.on("session_end", async (_event, ctx) => {
     clearSessionContext(ctx);
     api.logger.info(`[claude-mem] Session tracking cleaned up`);
   });
 
-  // ------------------------------------------------------------------
-  // Event: gateway_start — clear session tracking for fresh start
-  // ------------------------------------------------------------------
   api.on("gateway_start", async () => {
+    circuitReset();
     sessionIds.clear();
     contextCache.clear();
     recentPromptInits.clear();
     canonicalSessionKeys.clear();
     sessionAliasesByCanonicalKey.clear();
-    for (const timer of pendingCompletionTimers.values()) {
-      clearTimeout(timer);
-    }
-    pendingCompletionTimers.clear();
     api.logger.info("[claude-mem] Gateway started — session tracking reset");
   });
 
-  // ------------------------------------------------------------------
-  // Service: SSE observation feed → messaging channels
-  // ------------------------------------------------------------------
   let sseAbortController: AbortController | null = null;
   let connectionState: ConnectionState = "disconnected";
   let connectionPromise: Promise<void> | null = null;
@@ -948,9 +952,6 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     return Math.max(1, Math.min(50, Math.trunc(parsed)));
   }
 
-  // ------------------------------------------------------------------
-  // Command: /claude_mem_feed — status & toggle
-  // ------------------------------------------------------------------
   api.registerCommand({
     name: "claude_mem_feed",
     description: "Show or toggle Claude-Mem observation feed status",
@@ -984,10 +985,6 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     },
   });
 
-  // ------------------------------------------------------------------
-  // Command: /claude-mem-search — query worker search API
-  // Usage: /claude-mem-search <query> [limit]
-  // ------------------------------------------------------------------
   api.registerCommand({
     name: "claude-mem-search",
     description: "Search Claude-Mem observations by query",
@@ -1022,10 +1019,6 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     },
   });
 
-  // ------------------------------------------------------------------
-  // Command: /claude-mem-recent — recent context snapshot
-  // Usage: /claude-mem-recent [project] [limit]
-  // ------------------------------------------------------------------
   api.registerCommand({
     name: "claude-mem-recent",
     description: "Show recent Claude-Mem context for a project",
@@ -1065,10 +1058,6 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     },
   });
 
-  // ------------------------------------------------------------------
-  // Command: /claude-mem-timeline — search and timeline around best match
-  // Usage: /claude-mem-timeline <query> [depthBefore] [depthAfter]
-  // ------------------------------------------------------------------
   api.registerCommand({
     name: "claude-mem-timeline",
     description: "Find best memory match and show nearby timeline events",
@@ -1119,9 +1108,6 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     },
   });
 
-  // ------------------------------------------------------------------
-  // Command: /claude_mem_status — worker health check
-  // ------------------------------------------------------------------
   api.registerCommand({
     name: "claude_mem_status",
     description: "Check Claude-Mem worker health and session status",

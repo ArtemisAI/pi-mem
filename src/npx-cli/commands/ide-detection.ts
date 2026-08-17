@@ -1,51 +1,34 @@
-/**
- * IDE Auto-Detection
- *
- * Detects which AI coding IDEs / tools are installed on the system by
- * probing known config directories and checking for binaries in PATH.
- *
- * Pure Node.js — no Bun APIs used.
- */
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { existsSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { IS_WINDOWS } from '../utils/paths.js';
 
-// ---------------------------------------------------------------------------
-// IDE type and metadata
-// ---------------------------------------------------------------------------
-
 export interface IDEInfo {
-  /** Machine-readable identifier. */
   id: string;
-  /** Human-readable label for display in prompts. */
   label: string;
-  /** Whether the IDE was detected on this system. */
   detected: boolean;
-  /** Whether claude-mem has implemented setup for this IDE. */
-  supported: boolean;
-  /** Short hint text shown in the multi-select. */
   hint?: string;
 }
 
-// ---------------------------------------------------------------------------
-// PATH helper
-// ---------------------------------------------------------------------------
-
 function isCommandInPath(command: string): boolean {
   try {
-    const whichCommand = IS_WINDOWS ? 'where' : 'which';
-    execSync(`${whichCommand} ${command}`, { stdio: 'pipe' });
+    if (IS_WINDOWS) {
+      execFileSync('where.exe', [command], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } else {
+      execFileSync('which', [command], { stdio: 'ignore' });
+    }
     return true;
-  } catch {
+  } catch (error: unknown) {
+    if (process.env.DEBUG) {
+      console.error(`[ide-detection] ${command} not in PATH:`, error instanceof Error ? error.message : String(error));
+    }
     return false;
   }
 }
-
-// ---------------------------------------------------------------------------
-// VS Code extension directory scanner
-// ---------------------------------------------------------------------------
 
 function hasVscodeExtension(extensionNameFragment: string): boolean {
   const extensionsDirectory = join(homedir(), '.vscode', 'extensions');
@@ -53,20 +36,12 @@ function hasVscodeExtension(extensionNameFragment: string): boolean {
   try {
     const entries = readdirSync(extensionsDirectory);
     return entries.some((entry) => entry.toLowerCase().includes(extensionNameFragment.toLowerCase()));
-  } catch {
+  } catch (error: unknown) {
+    console.warn('[ide-detection] Failed to read VS Code extensions directory:', error instanceof Error ? error.message : String(error));
     return false;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Detection map
-// ---------------------------------------------------------------------------
-
-/**
- * Detect all known IDEs and return an array of `IDEInfo` objects.
- * Each entry indicates whether the IDE was found and whether claude-mem
- * currently supports setting it up.
- */
 export function detectInstalledIDEs(): IDEInfo[] {
   const home = homedir();
 
@@ -74,100 +49,69 @@ export function detectInstalledIDEs(): IDEInfo[] {
     {
       id: 'claude-code',
       label: 'Claude Code',
-      detected: existsSync(join(home, '.claude')),
-      supported: true,
+      detected: isCommandInPath('claude'),
       hint: 'recommended',
-    },
-    {
-      id: 'gemini-cli',
-      label: 'Gemini CLI',
-      detected: existsSync(join(home, '.gemini')),
-      supported: true,
     },
     {
       id: 'opencode',
       label: 'OpenCode',
       detected:
         existsSync(join(home, '.config', 'opencode')) || isCommandInPath('opencode'),
-      supported: true,
       hint: 'plugin-based integration',
     },
     {
       id: 'openclaw',
       label: 'OpenClaw',
       detected: existsSync(join(home, '.openclaw')),
-      supported: true,
       hint: 'plugin-based integration',
     },
     {
       id: 'windsurf',
       label: 'Windsurf',
       detected: existsSync(join(home, '.codeium', 'windsurf')),
-      supported: true,
     },
     {
       id: 'codex-cli',
       label: 'Codex CLI',
       detected: existsSync(join(home, '.codex')),
-      supported: true,
-      hint: 'transcript-based integration',
+      hint: 'native hooks integration',
     },
     {
       id: 'cursor',
       label: 'Cursor',
       detected: existsSync(join(home, '.cursor')),
-      supported: true,
       hint: 'hooks + MCP integration',
     },
     {
       id: 'copilot-cli',
       label: 'Copilot CLI',
       detected: isCommandInPath('copilot'),
-      supported: true,
       hint: 'MCP-based integration',
     },
     {
       id: 'antigravity',
       label: 'Antigravity',
-      detected: existsSync(join(home, '.gemini', 'antigravity')),
-      supported: true,
-      hint: 'MCP-based integration',
+      detected: existsSync(join(home, '.gemini', 'antigravity')) || isCommandInPath('agy'),
+      hint: 'hooks + MCP integration',
     },
     {
       id: 'goose',
       label: 'Goose',
       detected:
         existsSync(join(home, '.config', 'goose')) || isCommandInPath('goose'),
-      supported: true,
-      hint: 'MCP-based integration',
-    },
-    {
-      id: 'crush',
-      label: 'Crush',
-      detected: isCommandInPath('crush'),
-      supported: true,
       hint: 'MCP-based integration',
     },
     {
       id: 'roo-code',
       label: 'Roo Code',
       detected: hasVscodeExtension('roo-code'),
-      supported: true,
       hint: 'MCP-based integration',
     },
     {
       id: 'warp',
       label: 'Warp',
       detected: existsSync(join(home, '.warp')) || isCommandInPath('warp'),
-      supported: true,
       hint: 'MCP-based integration',
     },
   ];
-}
-
-/**
- * Return only the IDEs that were detected on this system.
- */
-export function getDetectedIDEs(): IDEInfo[] {
-  return detectInstalledIDEs().filter((ide) => ide.detected);
 }

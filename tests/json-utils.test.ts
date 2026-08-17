@@ -4,13 +4,6 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { readJsonSafe } from '../src/utils/json-utils';
 
-/**
- * Tests for the shared JSON file utilities.
- *
- * readJsonSafe is used across the CLI and services to safely read JSON
- * files with fallback to defaults when files are missing or corrupt.
- */
-
 describe('JSON Utils', () => {
   let tempDir: string;
 
@@ -122,6 +115,26 @@ describe('JSON Utils', () => {
       const result = readJsonSafe(filePath, {});
 
       expect(result).toEqual({ ok: true });
+    });
+
+    it('parses UTF-8 BOM prefixed JSON (Windows PowerShell 5.1)', () => {
+      const filePath = join(tempDir, 'settings.json');
+      const payload = { CLAUDE_MEM_MODEL: 'bom-model', nested: { ok: true } };
+      // EF BB BF is the UTF-8 BOM PowerShell 5.1 writes; decode becomes U+FEFF.
+      writeFileSync(filePath, Buffer.from([0xEF, 0xBB, 0xBF, ...Buffer.from(JSON.stringify(payload), 'utf-8')]));
+
+      const result = readJsonSafe(filePath, {});
+
+      expect(result).toEqual(payload);
+    });
+
+    it('parses string that already starts with U+FEFF', () => {
+      const filePath = join(tempDir, 'feff.json');
+      writeFileSync(filePath, '\uFEFF' + JSON.stringify({ port: 37777 }), 'utf-8');
+
+      const result = readJsonSafe<{ port: number }>(filePath, { port: 0 });
+
+      expect(result.port).toBe(37777);
     });
   });
 });

@@ -5,7 +5,7 @@
 ```text
 +-----------------------------------------------------------+
 |  Claude Code (host)                                       |
-|  +-- Hook System (5 events)                               |
+|  +-- Hook System (Setup + 5 lifecycle events)             |
 |  +-- MCP Client (search tools)                            |
 +-----------------------------------------------------------+
 |  CLI Layer (Bun)                                          |
@@ -14,7 +14,7 @@
 |  +-- handlers/ (context, session-init, observation,        |
 |                 summarize, session-complete)               |
 +-----------------------------------------------------------+
-|  Worker Daemon (Express, port 37777)                      |
+|  Worker Daemon (Express, per-user port 37700+(uid%100))   |
 |  +-- SessionManager (session lifecycle)                   |
 |  +-- SDKAgent (Claude Agent SDK)                          |
 |  +-- SearchManager (search orchestration)                 |
@@ -32,12 +32,14 @@
 
 | Event | Handler | What it does | Timeout |
 |-------|---------|-------------|---------|
-| Setup | setup.sh | Install system dependencies | 300s |
-| SessionStart | smart-install.js + context | Install deps + start worker + inject context | 60s |
+| Setup | version-check.js | Sub-100ms version-marker check; prompts `npx claude-mem repair` on mismatch | 60s |
+| SessionStart | worker start + context | Start worker service and inject context | 60s |
 | UserPromptSubmit | session-init | Register session + start SDK agent + semantic injection | 60s |
 | PostToolUse | observation | Capture tool usage -> enqueue in worker | 120s |
 | Summary | summarize | Request session summary from SDK agent | 120s |
 | SessionEnd | session-complete | End session + drain pending messages | 30s |
+
+On first install, `npx claude-mem install` sets up Bun and uv globally, runs `bun install` in the plugin cache, and writes an `.install-version` marker — all behind a visible clack spinner. The Setup hook then runs `version-check.js` on every Claude Code startup; if the plugin was upgraded externally (e.g. `claude plugin update`), it writes a hint to stderr asking the user to run `npx claude-mem repair`. The hook always exits 0 (non-blocking).
 
 ## Data Flow
 
@@ -62,27 +64,29 @@ Stop -> summarize -> /api/sessions/summarize
 
 ## Key Patterns
 
-### CLAIM-CONFIRM (PendingMessageStore)
+### Pending Queue (PendingMessageStore)
 
 ```text
-enqueue()           -> INSERT status='pending'
-claimNextMessage()  -> UPDATE status='processing' (atomic)
-confirmProcessed()  -> DELETE (success)
-markFailed()        -> UPDATE status='failed' (retry < 3)
-
-Self-healing: messages in 'processing' for >60s reset to 'pending'
+enqueue()                    -> INSERT row with `pending` status
+clearPendingForSession()     -> DELETE all pending rows for session
+                                (called whenever the parser returns
+                                a parseable response, regardless of
+                                whether observations were extracted)
 ```
 
-### Circuit-Breaker (SessionRoutes)
+Parser is binary: `{ valid: true, observations, summary }` or `{ valid: false }`.
+Unparseable responses leave the queue untouched and the session iterator continues.
+
+### Generator restart loop (SessionRoutes)
 
 ```text
 Generator crash -> retry 1 (1s) -> retry 2 (2s) -> retry 3 (4s)
-  -> consecutiveRestarts > 3 -> CIRCUIT-BREAKER
-  -> markAllSessionMessagesAbandoned(sessionDbId)
-  -> Stop. No infinite loop.
+  -> consecutiveRestarts > 3 -> stop and let the iterator end
 ```
 
-Counter resets to 0 when generator completes work naturally.
+Counter resets to 0 when generator completes work naturally. Pending
+messages remain in the queue across restarts and are cleared by the
+parser path on the next valid response.
 
 ### Graceful Degradation (hook-command.ts)
 
@@ -117,7 +121,7 @@ The conversion between them is handled by SessionStore and is critical for FK co
 | observations | memory_session_id, type, title, narrative, content_hash | Tool usage observations |
 | session_summaries | memory_session_id, request, learned, completed | Session summaries |
 | user_prompts | content_session_id, prompt_text | User prompt history |
-| pending_messages | session_db_id, status, message_type | CLAIM-CONFIRM queue |
+| pending_messages | session_db_id, message_type | Per-session pending queue |
 | observation_feedback | observation_id, signal_type | Usage tracking |
 
 ### ChromaDB (chroma.sqlite3)
